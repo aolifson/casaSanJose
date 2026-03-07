@@ -22,10 +22,10 @@ import MapView from './components/MapView';
 
 // ─── Default non-profit address ───────────────────────────────────────────────
 const DEFAULT_NONPROFIT: GeocodedAddress = {
-  raw: '9XR6+VJ Pittsburgh, Pennsylvania',
-  formatted: '9XR6+VJ Pittsburgh, Pennsylvania',
-  lat: 40.3936,
-  lng: -79.9939,
+  raw: '3010 Pioneer Ave, Pittsburgh, PA 15226',
+  formatted: '3010 Pioneer Ave, Pittsburgh, PA 15226',
+  lat: 40.4085,
+  lng: -80.0086,
 };
 
 // ─── localStorage helpers ──────────────────────────────────────────────────────
