@@ -20,14 +20,6 @@ import ImageAddressInput from './components/ImageAddressInput';
 import RouteResults from './components/RouteResults';
 import MapView from './components/MapView';
 
-// ─── Default non-profit address ───────────────────────────────────────────────
-const DEFAULT_NONPROFIT: GeocodedAddress = {
-  raw: '3010 Pioneer Ave, Pittsburgh, PA 15226',
-  formatted: '3010 Pioneer Ave, Pittsburgh, PA 15226',
-  lat: 40.4085,
-  lng: -80.0086,
-};
-
 // ─── localStorage helpers ──────────────────────────────────────────────────────
 function loadFromStorage<T>(key: string): T | null {
   try {
@@ -62,8 +54,8 @@ export default function App() {
 
   // ── App State ──────────────────────────────────────────────────────────────
   const [mode, setMode] = useState<AppMode>('coordinator');
-  const [nonprofitAddress, setNonprofitAddress] = useState<GeocodedAddress>(
-    loadFromStorage<GeocodedAddress>('csj_nonprofit') ?? DEFAULT_NONPROFIT
+  const [nonprofitAddress, setNonprofitAddress] = useState<GeocodedAddress | null>(
+    loadFromStorage<GeocodedAddress>('csj_nonprofit')
   );
 
   // Coordinator state
@@ -91,9 +83,9 @@ export default function App() {
       .catch((e) => setMapsError(e instanceof Error ? e.message : 'Failed to load Google Maps.'));
   }, [mapsApiKey]);
 
-  // ── Auto-geocode nonprofit if it only has placeholder coordinates ──────────
+  // ── Auto-geocode nonprofit if loaded from storage without a placeId ────────
   useEffect(() => {
-    if (!mapsReady || nonprofitAddress.placeId) return;
+    if (!mapsReady || !nonprofitAddress || nonprofitAddress.placeId) return;
     geocodeAddress(nonprofitAddress.raw || nonprofitAddress.formatted)
       .then((geocoded) => {
         setNonprofitAddress(geocoded);
@@ -115,9 +107,8 @@ export default function App() {
   };
 
   const handleNonprofitChange = (addr: GeocodedAddress | null) => {
-    const next = addr ?? DEFAULT_NONPROFIT;
-    setNonprofitAddress(next);
-    saveToStorage('csj_nonprofit', next);
+    setNonprofitAddress(addr);
+    saveToStorage('csj_nonprofit', addr);
   };
 
   const handleVolunteerHomeChange = useCallback((addr: GeocodedAddress | null) => {
@@ -139,6 +130,7 @@ export default function App() {
     setError('');
     if (deliveryPool.length === 0) { setError('Upload and geocode a delivery address file first.'); return; }
     if (numVolunteers < 1) { setError('Set at least 1 volunteer.'); return; }
+    if (!nonprofitAddress) { setError('Please enter the pickup (nonprofit) address.'); return; }
     if (!nonprofitAddress.placeId) { setError('The pickup address is still being verified — please wait a moment or re-enter it.'); return; }
 
     // Apply even-split numStops to each volunteer before routing
@@ -164,6 +156,7 @@ export default function App() {
     setError('');
     if (!volunteerHome) { setError('Please enter your home address.'); return; }
     if (assignedDeliveries.length === 0) { setError('Please add your assigned delivery addresses.'); return; }
+    if (!nonprofitAddress) { setError('Please enter the pickup (nonprofit) address.'); return; }
     if (!nonprofitAddress.placeId) { setError('The pickup address is still being verified — please wait a moment or re-enter it.'); return; }
 
     setComputing(true);
@@ -287,7 +280,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleGenerateRoutes}
-                  disabled={computing || deliveryPool.length === 0 || numVolunteers < 1}
+                  disabled={computing || !nonprofitAddress || deliveryPool.length === 0 || numVolunteers < 1}
                   className="btn-primary w-full py-4 text-base"
                 >
                   {computing ? 'Generating Routes...' : `Generate ${numVolunteers} Route${numVolunteers !== 1 ? 's' : ''} →`}
