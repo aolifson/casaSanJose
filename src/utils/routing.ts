@@ -1,4 +1,11 @@
-import type { GeocodedAddress, RouteResult, RouteStop, VolunteerEntry, VolunteerRouteResult } from '../types';
+import type {
+  GeocodedAddress,
+  PriorDeliveryAssignment,
+  RouteResult,
+  RouteStop,
+  VolunteerEntry,
+  VolunteerRouteResult,
+} from '../types';
 import {
   getDistanceMatrix,
   getOptimizedDirections,
@@ -58,39 +65,55 @@ export async function computeMultiVolunteerRoutes(
   const buckets: GeocodedAddress[][] = Array.from({ length: numVols }, () => []);
   sorted.forEach((addr, i) => buckets[i % numVols].push(addr));
 
-  const results: VolunteerRouteResult[] = [];
+  return buildRoutesForBuckets(volunteers, nonprofit, buckets);
+}
 
-  for (let vi = 0; vi < volunteers.length; vi++) {
-    const volunteer = volunteers[vi];
-    const bucket = buckets[vi];
-    if (bucket.length === 0) break;
+export async function computeNeighborhoodRoutes(
+  volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
+  deliveries: GeocodedAddress[],
+  priorAssignments: PriorDeliveryAssignment[]
+): Promise<VolunteerRouteResult[]> {
+  const activeVolunteers = volunteers.filter((volunteer) => volunteer.numStops > 0);
+  const buckets: GeocodedAddress[][] = Array.from({ length: activeVolunteers.length }, () => []);
+  const remainingCapacity = activeVolunteers.map((volunteer) => Math.max(0, volunteer.numStops));
+  const availableDeliveries = deliveries.map((address, index) => ({
+    address,
+    index,
+    zipCode: extractZipCode(address),
+  }));
 
-    // Respect the volunteer's numStops cap (already set by calcEvenSplit)
-    const numStops = Math.min(volunteer.numStops, bucket.length);
-    // Within their bucket, use nearest-neighbor to pick the best numStops and order them
-    const selected = await selectBestDeliveries(nonprofit, bucket, numStops);
+  const priorCounts = buildPriorAssignmentCounts(priorAssignments, activeVolunteers);
+  const unassignedIndexes = new Set(availableDeliveries.map((delivery) => delivery.index));
 
-    const origin = volunteer.homeAddress ?? nonprofit;
-    const destination = volunteer.homeAddress ?? nonprofit;
+  for (const delivery of availableDeliveries) {
+    const matchedVolunteerIndex = findBestPriorVolunteerIndex(
+      delivery.zipCode,
+      activeVolunteers,
+      remainingCapacity,
+      priorCounts
+    );
 
-    // Get optimized route for the selected deliveries.
-    // origin=nonprofit guarantees it's always the first stop; waypoint_order indexes into selected[].
-    try {
-      const directionsResult = await getOptimizedDirections(nonprofit, destination, selected);
-      const route = buildRouteResult(origin, destination, nonprofit, selected, directionsResult);
-      results.push({ volunteer, route });
-    } catch (e) {
-      const addressList = selected.map((a) => a.formatted).join(', ');
-      const msg = e instanceof Error ? e.message : 'Unknown routing error';
-      results.push({
-        volunteer,
-        route: null,
-        error: `${msg}\n\nAssigned addresses: ${addressList}`,
-      });
-    }
+    if (matchedVolunteerIndex === -1) continue;
+
+    buckets[matchedVolunteerIndex].push(delivery.address);
+    remainingCapacity[matchedVolunteerIndex] -= 1;
+    unassignedIndexes.delete(delivery.index);
+
+    const key = makePriorAssignmentKey(activeVolunteers[matchedVolunteerIndex].id, delivery.zipCode);
+    priorCounts.set(key, (priorCounts.get(key) ?? 1) - 1);
   }
 
-  return results;
+  const remainingDeliveries = availableDeliveries.filter((delivery) => unassignedIndexes.has(delivery.index));
+  for (const delivery of remainingDeliveries) {
+    const volunteerIndex = findClosestVolunteerIndex(delivery.address, activeVolunteers, remainingCapacity, buckets);
+    if (volunteerIndex === -1) continue;
+
+    buckets[volunteerIndex].push(delivery.address);
+    remainingCapacity[volunteerIndex] -= 1;
+  }
+
+  return buildRoutesForBuckets(activeVolunteers, nonprofit, buckets);
 }
 
 /**
@@ -134,6 +157,176 @@ async function selectBestDeliveries(
   }
 
   return selected;
+}
+
+function extractZipCode(address: GeocodedAddress): string {
+  return address.postalCode?.replace(/\D/g, '').slice(0, 5)
+    || address.raw.replace(/\D/g, '').slice(0, 5)
+    || address.formatted.replace(/\D/g, '').slice(0, 5);
+}
+
+function normalizeName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function tokenizeName(value: string): string[] {
+  return normalizeName(value)
+    .split(' ')
+    .filter((token) => token && token !== 'and');
+}
+
+function matchVolunteerName(
+  priorVolunteerName: string,
+  volunteers: VolunteerEntry[]
+): VolunteerEntry | null {
+  const normalizedPrior = normalizeName(priorVolunteerName);
+  const priorTokens = tokenizeName(priorVolunteerName);
+  let bestMatch: VolunteerEntry | null = null;
+  let bestScore = 0;
+
+  for (const volunteer of volunteers) {
+    const normalizedVolunteer = normalizeName(volunteer.name);
+    if (normalizedVolunteer === normalizedPrior) {
+      return volunteer;
+    }
+
+    const volunteerTokens = tokenizeName(volunteer.name);
+    const overlap = volunteerTokens.filter((token) => priorTokens.includes(token)).length;
+    let score = overlap * 10;
+
+    if (normalizedVolunteer.includes(normalizedPrior) || normalizedPrior.includes(normalizedVolunteer)) {
+      score += 30;
+    }
+
+    if (overlap > 0 && overlap === priorTokens.length) {
+      score += 20;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = volunteer;
+    }
+  }
+
+  return bestScore >= 20 ? bestMatch : null;
+}
+
+function makePriorAssignmentKey(volunteerId: string, zipCode: string): string {
+  return `${volunteerId}:${zipCode}`;
+}
+
+function buildPriorAssignmentCounts(
+  priorAssignments: PriorDeliveryAssignment[],
+  volunteers: VolunteerEntry[]
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const assignment of priorAssignments) {
+    const matchedVolunteer = matchVolunteerName(assignment.volunteerName, volunteers);
+    if (!matchedVolunteer) continue;
+
+    const key = makePriorAssignmentKey(matchedVolunteer.id, assignment.zipCode);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function findBestPriorVolunteerIndex(
+  zipCode: string,
+  volunteers: VolunteerEntry[],
+  remainingCapacity: number[],
+  priorCounts: Map<string, number>
+): number {
+  let bestIndex = -1;
+  let bestCount = 0;
+
+  for (let i = 0; i < volunteers.length; i++) {
+    if (remainingCapacity[i] <= 0) continue;
+
+    const count = priorCounts.get(makePriorAssignmentKey(volunteers[i].id, zipCode)) ?? 0;
+    if (count > bestCount) {
+      bestCount = count;
+      bestIndex = i;
+    }
+  }
+
+  return bestIndex;
+}
+
+function distanceBetween(a: GeocodedAddress, b: GeocodedAddress): number {
+  return Math.hypot(a.lat - b.lat, a.lng - b.lng);
+}
+
+function findClosestVolunteerIndex(
+  delivery: GeocodedAddress,
+  volunteers: VolunteerEntry[],
+  remainingCapacity: number[],
+  buckets: GeocodedAddress[][]
+): number {
+  let bestIndex = -1;
+  let bestScore = Infinity;
+
+  for (let i = 0; i < volunteers.length; i++) {
+    if (remainingCapacity[i] <= 0) continue;
+
+    const anchor = volunteers[i].homeAddress;
+    if (!anchor) continue;
+
+    const loadPenalty = buckets[i].length * 0.01;
+    const score = distanceBetween(anchor, delivery) + loadPenalty;
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+
+  if (bestIndex !== -1) return bestIndex;
+
+  for (let i = 0; i < remainingCapacity.length; i++) {
+    if (remainingCapacity[i] > 0) return i;
+  }
+
+  return -1;
+}
+
+async function buildRoutesForBuckets(
+  volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
+  buckets: GeocodedAddress[][]
+): Promise<VolunteerRouteResult[]> {
+  const results: VolunteerRouteResult[] = [];
+
+  for (let vi = 0; vi < volunteers.length; vi++) {
+    const volunteer = volunteers[vi];
+    const bucket = buckets[vi];
+    if (bucket.length === 0) continue;
+
+    const numStops = Math.min(volunteer.numStops, bucket.length);
+    const selected = bucket.length > numStops
+      ? await selectBestDeliveries(nonprofit, bucket, numStops)
+      : bucket;
+
+    const origin = volunteer.homeAddress ?? nonprofit;
+    const destination = volunteer.homeAddress ?? nonprofit;
+
+    try {
+      const directionsResult = await getOptimizedDirections(nonprofit, destination, selected);
+      const route = buildRouteResult(origin, destination, nonprofit, selected, directionsResult);
+      results.push({ volunteer, route });
+    } catch (e) {
+      const addressList = selected.map((address) => address.formatted).join(', ');
+      const msg = e instanceof Error ? e.message : 'Unknown routing error';
+      results.push({
+        volunteer,
+        route: null,
+        error: `${msg}\n\nAssigned addresses: ${addressList}`,
+      });
+    }
+  }
+
+  return results;
 }
 
 /**

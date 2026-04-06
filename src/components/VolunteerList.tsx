@@ -8,10 +8,17 @@ interface VolunteerListProps {
   volunteers: VolunteerEntry[];
   onChange: (volunteers: VolunteerEntry[]) => void;
   totalPoolSize: number;
+  locationMode?: 'address' | 'neighborhood';
 }
 
 function makeVolunteer(index: number): VolunteerEntry {
-  return { id: crypto.randomUUID(), name: `Volunteer ${index + 1}`, homeAddress: null, numStops: 0 };
+  return {
+    id: crypto.randomUUID(),
+    name: `Volunteer ${index + 1}`,
+    homeAddress: null,
+    homeNeighborhood: '',
+    numStops: 0,
+  };
 }
 
 /**
@@ -34,6 +41,7 @@ export default function VolunteerList({
   volunteers,
   onChange,
   totalPoolSize,
+  locationMode = 'address',
 }: VolunteerListProps) {
   // Sync volunteers array length to numVolunteers
   useEffect(() => {
@@ -96,6 +104,7 @@ export default function VolunteerList({
             index={idx}
             volunteer={volunteer}
             stops={splits[idx] ?? 0}
+            locationMode={locationMode}
             onUpdate={(patch) => updateVolunteer(volunteer.id, patch)}
           />
         ))}
@@ -108,10 +117,11 @@ interface VolunteerRowProps {
   index: number;
   volunteer: VolunteerEntry;
   stops: number;
+  locationMode: 'address' | 'neighborhood';
   onUpdate: (patch: Partial<VolunteerEntry>) => void;
 }
 
-function VolunteerRow({ index, volunteer, stops, onUpdate }: VolunteerRowProps) {
+function VolunteerRow({ index, volunteer, stops, locationMode, onUpdate }: VolunteerRowProps) {
   return (
     <div className="card p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -152,12 +162,39 @@ function VolunteerRow({ index, volunteer, stops, onUpdate }: VolunteerRowProps) 
         </div>
       </div>
 
-      <AddressInput
-        label="Home Address (optional — leave blank to start/end at Casa San Jose)"
-        placeholder="Volunteer's home address..."
-        value={volunteer.homeAddress}
-        onChange={(addr: GeocodedAddress | null) => onUpdate({ homeAddress: addr })}
-      />
+      {locationMode === 'neighborhood' ? (
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-600">
+            Home Neighborhood <span className="text-gray-400">(used to find an approximate home ZIP)</span>
+          </label>
+          <input
+            type="text"
+            value={volunteer.homeNeighborhood ?? ''}
+            onChange={(e) =>
+              onUpdate({
+                homeNeighborhood: e.target.value,
+                homeAddress: null,
+                homeZipCode: undefined,
+              })
+            }
+            placeholder="Uptown, Penn Hills, Mt. Lebo..."
+            className="input"
+          />
+          {(volunteer.homeZipCode || volunteer.homeAddress?.formatted) && (
+            <p className="mt-1 text-xs text-gray-500">
+              {volunteer.homeZipCode ? `Approx ZIP ${volunteer.homeZipCode}` : 'Location matched'}{' '}
+              {volunteer.homeAddress?.formatted ? `· ${volunteer.homeAddress.formatted}` : ''}
+            </p>
+          )}
+        </div>
+      ) : (
+        <AddressInput
+          label="Home Address (optional — leave blank to start/end at Casa San Jose)"
+          placeholder="Volunteer's home address..."
+          value={volunteer.homeAddress}
+          onChange={(addr: GeocodedAddress | null) => onUpdate({ homeAddress: addr })}
+        />
+      )}
     </div>
   );
 }

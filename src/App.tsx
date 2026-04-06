@@ -2,12 +2,13 @@ import { useState, useEffect, useCallback } from 'react';
 import type {
   AppMode,
   GeocodedAddress,
+  PriorDeliveryAssignment,
   RouteResult,
   VolunteerEntry,
   VolunteerRouteResult,
 } from './types';
-import { loadMapsApi, geocodeAddress } from './utils/maps';
-import { computeVolunteerRoute, computeMultiVolunteerRoutes } from './utils/routing';
+import { loadMapsApi, geocodeAddress, geocodeNeighborhood } from './utils/maps';
+import { computeVolunteerRoute, computeMultiVolunteerRoutes, computeNeighborhoodRoutes } from './utils/routing';
 import { calcEvenSplit } from './components/VolunteerList';
 
 import TabNav from './components/TabNav';
@@ -15,6 +16,7 @@ import ApiKeyInput from './components/ApiKeyInput';
 import AddressInput from './components/AddressInput';
 import AddressList from './components/AddressList';
 import FileUpload from './components/FileUpload';
+import SpreadsheetUpload from './components/SpreadsheetUpload';
 import VolunteerList from './components/VolunteerList';
 import ImageAddressInput from './components/ImageAddressInput';
 import RouteResults from './components/RouteResults';
@@ -48,6 +50,10 @@ export default function App() {
     loadFromStorage<string>('csj_anthropic_key') || ''
   );
   const [showAnthropicKeyPrompt, setShowAnthropicKeyPrompt] = useState(false);
+  const [textBeltKey, setTextBeltKey] = useState<string>(
+    loadFromStorage<string>('csj_textbelt_key') || ''
+  );
+  const [showTextBeltInput, setShowTextBeltInput] = useState(false);
 
   const [mapsReady, setMapsReady] = useState(false);
   const [mapsError, setMapsError] = useState('');
@@ -60,6 +66,8 @@ export default function App() {
 
   // Coordinator state
   const [deliveryPool, setDeliveryPool] = useState<GeocodedAddress[]>([]);
+  const [coordinatorInputMode, setCoordinatorInputMode] = useState<'addresses' | 'sheet'>('addresses');
+  const [priorAssignments, setPriorAssignments] = useState<PriorDeliveryAssignment[]>([]);
   const [numVolunteers, setNumVolunteers] = useState(2);
   const [volunteers, setVolunteers] = useState<VolunteerEntry[]>([]);
   const [coordResults, setCoordResults] = useState<VolunteerRouteResult[] | null>(null);
@@ -106,6 +114,12 @@ export default function App() {
     setShowAnthropicKeyPrompt(false);
   };
 
+  const handleTextBeltKey = (key: string) => {
+    setTextBeltKey(key);
+    saveToStorage('csj_textbelt_key', key);
+    setShowTextBeltInput(false);
+  };
+
   const handleNonprofitChange = (addr: GeocodedAddress | null) => {
     setNonprofitAddress(addr);
     saveToStorage('csj_nonprofit', addr);
@@ -115,6 +129,66 @@ export default function App() {
     setVolunteerHome(addr);
     saveToStorage('csj_vol_home', addr);
   }, []);
+
+  const handleCoordinatorAddressesLoaded = useCallback((addresses: GeocodedAddress[]) => {
+    setCoordinatorInputMode('addresses');
+    setPriorAssignments([]);
+    setDeliveryPool(addresses);
+    setCoordResults(null);
+    setError('');
+  }, []);
+
+  const handleSpreadsheetLoaded = useCallback((payload: {
+    deliveries: GeocodedAddress[];
+    volunteers: VolunteerEntry[];
+    priorAssignments: PriorDeliveryAssignment[];
+  }) => {
+    setCoordinatorInputMode('sheet');
+    setPriorAssignments(payload.priorAssignments);
+    setDeliveryPool(payload.deliveries);
+    setVolunteers(payload.volunteers);
+    setNumVolunteers(payload.volunteers.length);
+    setCoordResults(null);
+    setError('');
+  }, []);
+
+  const resolveCoordinatorVolunteerLocations = useCallback(async (inputVolunteers: VolunteerEntry[]) => {
+    if (coordinatorInputMode !== 'sheet') return inputVolunteers;
+
+    const hydrated = await Promise.all(
+      inputVolunteers.map(async (volunteer) => {
+        const neighborhood = volunteer.homeNeighborhood?.trim();
+        if (!neighborhood) {
+          return volunteer;
+        }
+
+        if (volunteer.homeAddress && volunteer.homeAddress.raw === neighborhood) {
+          return volunteer;
+        }
+
+        try {
+          const homeAddress = await geocodeNeighborhood(neighborhood);
+          return {
+            ...volunteer,
+            homeAddress,
+            homeZipCode: homeAddress.postalCode,
+          };
+        } catch {
+          return {
+            ...volunteer,
+            homeAddress: null,
+            homeZipCode: undefined,
+          };
+        }
+      })
+    );
+
+    setVolunteers((current) =>
+      current.map((existing) => hydrated.find((volunteer) => volunteer.id === existing.id) ?? existing)
+    );
+
+    return hydrated;
+  }, [coordinatorInputMode]);
 
   // ── Mode switch resets results ─────────────────────────────────────────────
   const handleModeChange = (m: AppMode) => {
@@ -128,21 +202,34 @@ export default function App() {
   // ── Coordinator: generate all routes (even-split) ─────────────────────────
   const handleGenerateRoutes = async () => {
     setError('');
-    if (deliveryPool.length === 0) { setError('Upload and geocode a delivery address file first.'); return; }
+    if (deliveryPool.length === 0) { setError('Upload and geocode delivery data first.'); return; }
     if (numVolunteers < 1) { setError('Set at least 1 volunteer.'); return; }
     if (!nonprofitAddress) { setError('Please enter the pickup (nonprofit) address.'); return; }
     if (!nonprofitAddress.placeId) { setError('The pickup address is still being verified — please wait a moment or re-enter it.'); return; }
 
-    // Apply even-split numStops to each volunteer before routing
-    const splits = calcEvenSplit(deliveryPool.length, numVolunteers);
-    const volunteersWithStops = volunteers.slice(0, numVolunteers).map((v, i) => ({
-      ...v,
-      numStops: splits[i],
-    }));
-
     setComputing(true);
     try {
-      const results = await computeMultiVolunteerRoutes(volunteersWithStops, nonprofitAddress, deliveryPool);
+      const splits = calcEvenSplit(deliveryPool.length, numVolunteers);
+      const volunteersWithStops = volunteers.slice(0, numVolunteers).map((v, i) => ({
+        ...v,
+        numStops: splits[i],
+      }));
+
+      const hydratedVolunteers = await resolveCoordinatorVolunteerLocations(volunteersWithStops);
+
+      if (coordinatorInputMode === 'sheet') {
+        const missingNeighborhoods = hydratedVolunteers.filter(
+          (volunteer) => volunteer.numStops > 0 && (!volunteer.homeNeighborhood?.trim() || !volunteer.homeAddress)
+        );
+        if (missingNeighborhoods.length > 0) {
+          setError(`Please fix the neighborhood for: ${missingNeighborhoods.map((volunteer) => volunteer.name).join(', ')}`);
+          return;
+        }
+      }
+
+      const results = coordinatorInputMode === 'sheet'
+        ? await computeNeighborhoodRoutes(hydratedVolunteers, nonprofitAddress, deliveryPool, priorAssignments)
+        : await computeMultiVolunteerRoutes(hydratedVolunteers, nonprofitAddress, deliveryPool);
       setCoordResults(results);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate routes. Please try again.');
@@ -227,13 +314,60 @@ export default function App() {
 
         {/* Non-profit address (shared) */}
         {mapsReady && (
-          <div className="card p-4">
+          <div className="card p-4 space-y-3">
             <AddressInput
               label="Non-profit pickup address"
               placeholder="Casa San Jose address..."
               value={nonprofitAddress}
               onChange={handleNonprofitChange}
             />
+            {/* Optional TextBelt SMS key */}
+            {!showTextBeltInput && (
+              <button
+                type="button"
+                onClick={() => setShowTextBeltInput(true)}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                {textBeltKey ? '✓ SMS configured · change key' : '+ Add SMS API key (optional)'}
+              </button>
+            )}
+            {showTextBeltInput && (
+              <div className="space-y-1">
+                <label className="block text-xs font-medium text-gray-600">
+                  TextBelt API key{' '}
+                  <a href="https://textbelt.com" target="_blank" rel="noreferrer" className="text-amber-600 underline">
+                    textbelt.com
+                  </a>{' '}
+                  — use <code className="bg-gray-100 px-1 rounded">textbelt</code> for 1 free/day
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    defaultValue={textBeltKey}
+                    placeholder="textbelt or your paid key"
+                    className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-amber-400 focus:outline-none"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleTextBeltKey((e.target as HTMLInputElement).value.trim());
+                    }}
+                    id="textbelt-key-input"
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary text-sm px-3"
+                    onClick={() => {
+                      const val = (document.getElementById('textbelt-key-input') as HTMLInputElement)?.value.trim();
+                      if (val) handleTextBeltKey(val);
+                      else setShowTextBeltInput(false);
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button type="button" className="btn-secondary text-sm px-3" onClick={() => setShowTextBeltInput(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -252,11 +386,21 @@ export default function App() {
               <div className="space-y-4">
                 {/* Step 1: upload delivery pool */}
                 <div className="card p-4">
-                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Delivery Addresses</p>
-                  <FileUpload onAddressesLoaded={setDeliveryPool} />
-                  {deliveryPool.length > 0 && (
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Delivery Data</p>
+                  <div className="space-y-4">
+                    <FileUpload onAddressesLoaded={handleCoordinatorAddressesLoaded} />
+                    <div className="border-t border-dashed border-gray-200 pt-4">
+                      <SpreadsheetUpload onSheetLoaded={handleSpreadsheetLoaded} />
+                    </div>
+                  </div>
+                  {deliveryPool.length > 0 && coordinatorInputMode === 'addresses' && (
                     <p className="mt-3 text-xs font-medium text-green-700">
                       ✓ {deliveryPool.length} delivery addresses ready
+                    </p>
+                  )}
+                  {deliveryPool.length > 0 && coordinatorInputMode === 'sheet' && (
+                    <p className="mt-3 text-xs font-medium text-green-700">
+                      ✓ {deliveryPool.length} delivery ZIPs and {numVolunteers} driver neighborhoods ready
                     </p>
                   )}
                 </div>
@@ -270,6 +414,7 @@ export default function App() {
                     volunteers={volunteers}
                     onChange={setVolunteers}
                     totalPoolSize={deliveryPool.length}
+                    locationMode={coordinatorInputMode === 'sheet' ? 'neighborhood' : 'address'}
                   />
                 </div>
 
@@ -295,7 +440,7 @@ export default function App() {
             )}
 
             {mode === 'coordinator' && coordResults && (
-              <RouteResults mode="coordinator" results={coordResults} onReset={resetCoord} />
+              <RouteResults mode="coordinator" results={coordResults} textBeltKey={textBeltKey || undefined} onReset={resetCoord} />
             )}
 
             {/* ── VOLUNTEER MODE ── */}
@@ -418,4 +563,3 @@ function AnthropicKeyPrompt({
     </div>
   );
 }
-

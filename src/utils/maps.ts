@@ -2,6 +2,13 @@ import type { GeocodedAddress, GeocodingProgress } from '../types';
 
 let mapsLoaded = false;
 
+const PITTSBURGH_BOUNDS: google.maps.LatLngBoundsLiteral = {
+  north: 40.65,
+  south: 40.20,
+  east: -79.70,
+  west: -80.40,
+};
+
 /**
  * Load the Google Maps JavaScript SDK once. Idempotent.
  */
@@ -33,42 +40,91 @@ export async function loadMapsApi(apiKey: string): Promise<void> {
  */
 export async function geocodeAddress(raw: string): Promise<GeocodedAddress> {
   const geocoder = new google.maps.Geocoder();
-  // Hard-restrict to PA, with a bounding box biasing toward Pittsburgh metro.
-  // bounds is a hint (not a hard filter) but combined with administrativeArea
-  // it prevents stray matches in other states or countries.
-  const result = await geocoder.geocode({
+  return geocodeWithRequest(geocoder, raw, {
     address: raw,
     componentRestrictions: { country: 'US', administrativeArea: 'PA' },
-    bounds: {
-      north: 40.65,
-      south: 40.20,
-      east: -79.70,
-      west: -80.40,
-    },
+    bounds: PITTSBURGH_BOUNDS,
   });
+}
+
+function findPostalCode(components: google.maps.GeocoderAddressComponent[] = []): string | undefined {
+  const postal = components.find((component) => component.types.includes('postal_code'))?.long_name;
+  return postal?.replace(/\D/g, '').slice(0, 5) || undefined;
+}
+
+async function geocodeWithRequest(
+  geocoder: google.maps.Geocoder,
+  raw: string,
+  request: google.maps.GeocoderRequest,
+  sourceType: GeocodedAddress['sourceType'] = 'address'
+): Promise<GeocodedAddress> {
+  const result = await geocoder.geocode(request);
 
   if (!result.results || result.results.length === 0) {
     throw new Error(`Could not geocode address: "${raw}"`);
   }
 
   const top = result.results[0];
+  let postalCode = findPostalCode(top.address_components);
+
+  if (!postalCode) {
+    const reverse = await geocoder.geocode({
+      location: top.geometry.location,
+    });
+    postalCode = findPostalCode(reverse.results[0]?.address_components);
+  }
+
   return {
     raw,
     formatted: top.formatted_address,
     lat: top.geometry.location.lat(),
     lng: top.geometry.location.lng(),
     placeId: top.place_id,
+    postalCode,
+    sourceType,
   };
 }
 
-/**
- * Geocode multiple addresses in parallel (max 10 concurrent).
- * Fires onProgress callback after each completion.
- * Returns successfully geocoded results; failed addresses are included in progress.failed.
- */
-export async function geocodeAddressBatch(
+function normalizeNeighborhood(raw: string): string {
+  return raw.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+export async function geocodeZipCode(zipCode: string): Promise<GeocodedAddress> {
+  const geocoder = new google.maps.Geocoder();
+  const normalizedZip = zipCode.replace(/\D/g, '').slice(0, 5);
+
+  return geocodeWithRequest(
+    geocoder,
+    normalizedZip,
+    {
+      address: `${normalizedZip}, PA`,
+      componentRestrictions: { country: 'US', administrativeArea: 'PA', postalCode: normalizedZip },
+      bounds: PITTSBURGH_BOUNDS,
+    },
+    'zip'
+  );
+}
+
+export async function geocodeNeighborhood(neighborhood: string): Promise<GeocodedAddress> {
+  const geocoder = new google.maps.Geocoder();
+  const cleaned = normalizeNeighborhood(neighborhood);
+
+  return geocodeWithRequest(
+    geocoder,
+    neighborhood,
+    {
+      address: `${cleaned}, Pennsylvania`,
+      componentRestrictions: { country: 'US', administrativeArea: 'PA' },
+      bounds: PITTSBURGH_BOUNDS,
+    },
+    'neighborhood'
+  );
+}
+
+async function geocodeBatch(
   raws: string[],
-  onProgress: (p: GeocodingProgress) => void
+  onProgress: (p: GeocodingProgress) => void,
+  geocodeFn: (raw: string) => Promise<GeocodedAddress>
 ): Promise<GeocodedAddress[]> {
   const CONCURRENCY = 10;
   const results: GeocodedAddress[] = [];
@@ -80,16 +136,15 @@ export async function geocodeAddressBatch(
 
   report();
 
-  // Process in chunks to respect concurrency limit
   for (let i = 0; i < raws.length; i += CONCURRENCY) {
     const chunk = raws.slice(i, i + CONCURRENCY);
-    const settled = await Promise.allSettled(chunk.map((raw) => geocodeAddress(raw)));
+    const settled = await Promise.allSettled(chunk.map((raw) => geocodeFn(raw)));
 
     for (let j = 0; j < settled.length; j++) {
-      const r = settled[j];
+      const result = settled[j];
       completed++;
-      if (r.status === 'fulfilled') {
-        results.push(r.value);
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
       } else {
         failed.push(chunk[j]);
       }
@@ -98,6 +153,32 @@ export async function geocodeAddressBatch(
   }
 
   return results;
+}
+
+/**
+ * Geocode multiple addresses in parallel (max 10 concurrent).
+ * Fires onProgress callback after each completion.
+ * Returns successfully geocoded results; failed addresses are included in progress.failed.
+ */
+export async function geocodeAddressBatch(
+  raws: string[],
+  onProgress: (p: GeocodingProgress) => void
+): Promise<GeocodedAddress[]> {
+  return geocodeBatch(raws, onProgress, geocodeAddress);
+}
+
+export async function geocodeZipCodeBatch(
+  zipCodes: string[],
+  onProgress: (p: GeocodingProgress) => void
+): Promise<GeocodedAddress[]> {
+  return geocodeBatch(zipCodes, onProgress, geocodeZipCode);
+}
+
+export async function geocodeNeighborhoodBatch(
+  neighborhoods: string[],
+  onProgress: (p: GeocodingProgress) => void
+): Promise<GeocodedAddress[]> {
+  return geocodeBatch(neighborhoods, onProgress, geocodeNeighborhood);
 }
 
 /**

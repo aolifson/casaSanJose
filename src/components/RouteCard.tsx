@@ -1,17 +1,27 @@
 import { useState } from 'react';
 import type { RouteResult } from '../types';
 import MapView from './MapView';
+import { sendTextBelt } from '../utils/sms';
 
 interface RouteCardProps {
   title: string;
   result: RouteResult;
   phone?: string;
+  textBeltKey?: string;
   defaultExpanded?: boolean;
 }
 
-export default function RouteCard({ title, result, phone, defaultExpanded = true }: RouteCardProps) {
+export default function RouteCard({
+  title,
+  result,
+  phone,
+  textBeltKey,
+  defaultExpanded = true,
+}: RouteCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [copied, setCopied] = useState(false);
+  const [smsState, setSmsState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [smsError, setSmsError] = useState('');
 
   const smsBody = [
     `Your delivery route (${result.totalDurationMinutes} min, ${result.totalDistanceMiles} mi):`,
@@ -30,7 +40,6 @@ export default function RouteCard({ title, result, phone, defaultExpanded = true
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback: select text in a temporary input
       const el = document.createElement('textarea');
       el.value = result.googleMapsUrl;
       document.body.appendChild(el);
@@ -39,6 +48,24 @@ export default function RouteCard({ title, result, phone, defaultExpanded = true
       document.body.removeChild(el);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleSendSms = async () => {
+    if (!phone || !textBeltKey) return;
+    setSmsState('sending');
+    setSmsError('');
+    try {
+      const res = await sendTextBelt(phone, smsBody, textBeltKey);
+      if (res.success) {
+        setSmsState('sent');
+      } else {
+        setSmsState('error');
+        setSmsError(res.error ?? 'Unknown error');
+      }
+    } catch (e) {
+      setSmsState('error');
+      setSmsError(e instanceof Error ? e.message : 'Failed to send');
     }
   };
 
@@ -101,12 +128,30 @@ export default function RouteCard({ title, result, phone, defaultExpanded = true
             >
               {copied ? '✓ Copied!' : 'Copy Route Link'}
             </button>
-            {smsHref && (
+
+            {/* SMS — API send if key present, otherwise native sms: link */}
+            {phone && textBeltKey ? (
+              <button
+                type="button"
+                onClick={handleSendSms}
+                disabled={smsState === 'sending' || smsState === 'sent'}
+                className="btn-secondary flex-1"
+              >
+                {smsState === 'sending' && 'Sending...'}
+                {smsState === 'sent' && '✓ Sent!'}
+                {smsState === 'idle' && 'Send Text'}
+                {smsState === 'error' && 'Retry Text'}
+              </button>
+            ) : smsHref ? (
               <a href={smsHref} className="btn-secondary flex-1 text-center">
                 📱 Text Route
               </a>
-            )}
+            ) : null}
           </div>
+
+          {smsState === 'error' && smsError && (
+            <p className="text-xs text-red-600">SMS failed: {smsError}</p>
+          )}
         </div>
       )}
     </div>

@@ -4,6 +4,8 @@ export interface GeocodedAddress {
   lat: number;
   lng: number;
   placeId?: string;
+  postalCode?: string;
+  sourceType?: 'address' | 'zip' | 'neighborhood';
 }
 
 export interface VolunteerEntry {
@@ -11,7 +13,26 @@ export interface VolunteerEntry {
   name: string;
   phone?: string;
   homeAddress: GeocodedAddress | null;
+  homeNeighborhood?: string;
+  homeZipCode?: string;
   numStops: number;
+}
+
+export interface PriorDeliveryAssignment {
+  zipCode: string;
+  volunteerName: string;
+  neighborhood?: string;
+}
+
+export interface DeliverySheetDriver {
+  name: string;
+  neighborhood: string;
+}
+
+export interface ParsedDeliverySheet {
+  deliveryZipCodes: string[];
+  priorAssignments: PriorDeliveryAssignment[];
+  drivers: DeliverySheetDriver[];
 }
 
 export interface RouteStop {

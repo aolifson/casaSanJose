@@ -1,5 +1,6 @@
 import Papa from 'papaparse';
 import { XMLParser } from 'fast-xml-parser';
+import type { ParsedDeliverySheet, PriorDeliveryAssignment } from '../types';
 
 /**
  * Parse a CSV file text and extract address strings.
@@ -32,6 +33,97 @@ export function parseCSV(text: string): string[] {
   }
 
   return addresses.filter(Boolean);
+}
+
+function normalizeCell(value: string | undefined): string {
+  return value?.trim() ?? '';
+}
+
+function normalizeZip(value: string | undefined): string | null {
+  const digits = (value ?? '').replace(/\D/g, '');
+  return digits.length === 5 ? digits : null;
+}
+
+function findCell(rows: string[][], target: string): { row: number; col: number } | null {
+  const lowerTarget = target.toLowerCase();
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
+    for (let colIndex = 0; colIndex < row.length; colIndex++) {
+      if (normalizeCell(row[colIndex]).toLowerCase() === lowerTarget) {
+        return { row: rowIndex, col: colIndex };
+      }
+    }
+  }
+
+  return null;
+}
+
+export function parseDeliverySheetCsv(text: string): ParsedDeliverySheet {
+  const result = Papa.parse<string[]>(text.trim(), {
+    header: false,
+    skipEmptyLines: false,
+  });
+
+  const rows = result.data.map((row) => row.map(normalizeCell));
+  const thisWeekCell = findCell(rows, 'This week');
+  const lastWeekCell = findCell(rows, 'Last Week');
+  const driversCell = findCell(rows, 'Drivers');
+
+  if (!thisWeekCell || !lastWeekCell || !driversCell) {
+    throw new Error(
+      'This CSV does not look like the Casa San Jose weekly sheet. Export the April or March tab as CSV and try again.'
+    );
+  }
+
+  const deliveryZipCodes: string[] = [];
+  const priorAssignments: PriorDeliveryAssignment[] = [];
+  const driversByName = new Map<string, { name: string; neighborhood: string }>();
+
+  const firstDataRow = Math.min(thisWeekCell.row, lastWeekCell.row, driversCell.row) + 1;
+
+  for (let rowIndex = firstDataRow; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
+
+    const deliveryZip = normalizeZip(row[thisWeekCell.col]);
+    if (deliveryZip) {
+      deliveryZipCodes.push(deliveryZip);
+    }
+
+    const priorZip = normalizeZip(row[lastWeekCell.col]);
+    const priorVolunteerName = normalizeCell(row[lastWeekCell.col + 1]);
+    const priorNeighborhood = normalizeCell(row[lastWeekCell.col + 2]);
+    if (priorZip && priorVolunteerName) {
+      priorAssignments.push({
+        zipCode: priorZip,
+        volunteerName: priorVolunteerName,
+        neighborhood: priorNeighborhood || undefined,
+      });
+    }
+
+    const driverName = normalizeCell(row[driversCell.col]);
+    const driverNeighborhood = normalizeCell(row[driversCell.col + 2]);
+    if (driverName && driverNeighborhood) {
+      driversByName.set(driverName, {
+        name: driverName,
+        neighborhood: driverNeighborhood,
+      });
+    }
+  }
+
+  if (deliveryZipCodes.length === 0) {
+    throw new Error('No delivery ZIP codes were found in the "This week" column.');
+  }
+
+  if (driversByName.size === 0) {
+    throw new Error('No drivers were found in the "Drivers" section.');
+  }
+
+  return {
+    deliveryZipCodes,
+    priorAssignments,
+    drivers: [...driversByName.values()],
+  };
 }
 
 function extractAddressFromRow(row: Record<string, string>): string | null {

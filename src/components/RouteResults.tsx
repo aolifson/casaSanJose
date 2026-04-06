@@ -1,9 +1,12 @@
+import { useState } from 'react';
 import type { RouteResult, VolunteerRouteResult } from '../types';
 import RouteCard from './RouteCard';
+import { sendTextBelt } from '../utils/sms';
 
 interface VolunteerResultsProps {
   mode: 'coordinator';
   results: VolunteerRouteResult[];
+  textBeltKey?: string;
   onReset: () => void;
 }
 
@@ -16,30 +19,87 @@ interface SingleResultProps {
 type RouteResultsProps = VolunteerResultsProps | SingleResultProps;
 
 export default function RouteResults(props: RouteResultsProps) {
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold text-gray-800">
-          {props.mode === 'coordinator'
-            ? `${(props as VolunteerResultsProps).results.length} Routes Generated`
-            : 'Your Route'}
-        </h2>
-        <button type="button" onClick={props.onReset} className="btn-secondary text-xs">
-          ← Start Over
-        </button>
-      </div>
+  const [sendAllState, setSendAllState] = useState<'idle' | 'sending' | 'done'>('idle');
+  const [sendAllSummary, setSendAllSummary] = useState('');
 
-      {props.mode === 'volunteer' ? (
-        <RouteCard title="Your Delivery Route" result={(props as SingleResultProps).result} />
-      ) : (
+  const handleSendAll = async () => {
+    if (props.mode !== 'coordinator') return;
+    const { results, textBeltKey } = props as VolunteerResultsProps;
+    if (!textBeltKey) return;
+
+    const targets = results.filter(
+      ({ volunteer, route }) => volunteer.phone && route,
+    );
+    if (targets.length === 0) return;
+
+    setSendAllState('sending');
+    let sent = 0;
+    let failed = 0;
+
+    for (const { volunteer, route } of targets) {
+      const smsBody = [
+        `Your delivery route (${route!.totalDurationMinutes} min, ${route!.totalDistanceMiles} mi):`,
+        ...route!.stops.map((s) => `${s.order}. ${s.label}: ${s.address.formatted}`),
+        '',
+        route!.googleMapsUrl,
+      ].join('\n');
+
+      try {
+        const res = await sendTextBelt(volunteer.phone!, smsBody, textBeltKey);
+        if (res.success) sent++; else failed++;
+      } catch {
+        failed++;
+      }
+    }
+
+    setSendAllState('done');
+    setSendAllSummary(
+      failed === 0
+        ? `✓ ${sent} text${sent !== 1 ? 's' : ''} sent`
+        : `${sent} sent, ${failed} failed`,
+    );
+  };
+
+  if (props.mode === 'coordinator') {
+    const { results, textBeltKey, onReset } = props as VolunteerResultsProps;
+    const phoneCount = results.filter((r) => r.volunteer.phone && r.route).length;
+
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-semibold text-gray-800">
+            {results.length} Routes Generated
+          </h2>
+          <div className="flex items-center gap-2">
+            {textBeltKey && phoneCount > 0 && (
+              <button
+                type="button"
+                onClick={handleSendAll}
+                disabled={sendAllState === 'sending' || sendAllState === 'done'}
+                className="btn-primary text-xs py-1.5 px-3"
+              >
+                {sendAllState === 'sending'
+                  ? 'Sending...'
+                  : sendAllState === 'done'
+                  ? sendAllSummary
+                  : `Send All ${phoneCount} Text${phoneCount !== 1 ? 's' : ''}`}
+              </button>
+            )}
+            <button type="button" onClick={onReset} className="btn-secondary text-xs">
+              ← Start Over
+            </button>
+          </div>
+        </div>
+
         <div className="space-y-3">
-          {(props as VolunteerResultsProps).results.map(({ volunteer, route, error }, i) =>
+          {results.map(({ volunteer, route, error }, i) =>
             route ? (
               <RouteCard
                 key={volunteer.id}
                 title={volunteer.name || `Volunteer ${i + 1}`}
                 result={route}
                 phone={volunteer.phone}
+                textBeltKey={textBeltKey}
                 defaultExpanded={i === 0}
               />
             ) : (
@@ -52,7 +112,19 @@ export default function RouteResults(props: RouteResultsProps) {
             )
           )}
         </div>
-      )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold text-gray-800">Your Route</h2>
+        <button type="button" onClick={props.onReset} className="btn-secondary text-xs">
+          ← Start Over
+        </button>
+      </div>
+      <RouteCard title="Your Delivery Route" result={(props as SingleResultProps).result} />
     </div>
   );
 }
