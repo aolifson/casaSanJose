@@ -7,7 +7,11 @@ import type {
   WeeklySheetSource,
 } from '../types';
 import { parseDeliverySheetCsv } from '../utils/fileParser';
-import { loadGoogleSheetWorkbook, workbookSheetToCsv } from '../utils/googleSheets';
+import {
+  loadGoogleSheetWorkbook,
+  loadLocalWorkbookFromArrayBuffer,
+  workbookSheetToCsv,
+} from '../utils/googleSheets';
 import { geocodeNeighborhood, geocodeZipCode } from '../utils/maps';
 
 interface SpreadsheetUploadProps {
@@ -51,6 +55,7 @@ async function geocodeFixedList(
 export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const workbookRef = useRef<Awaited<ReturnType<typeof loadGoogleSheetWorkbook>> | null>(null);
+  const localWorkbookRef = useRef<Awaited<ReturnType<typeof loadLocalWorkbookFromArrayBuffer>> | null>(null);
 
   const [state, setState] = useState<UploadState>('idle');
   const [importMode, setImportMode] = useState<ImportMode>('google-sheet');
@@ -59,6 +64,9 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
   const [availableTabs, setAvailableTabs] = useState<string[]>([]);
   const [selectedTab, setSelectedTab] = useState('');
   const [loadingTabs, setLoadingTabs] = useState(false);
+  const [selectedFileName, setSelectedFileName] = useState('');
+  const [fileTabs, setFileTabs] = useState<string[]>([]);
+  const [selectedFileTab, setSelectedFileTab] = useState('');
   const [summary, setSummary] = useState<WeeklySheetContext | null>(null);
   const [progress, setProgress] = useState<GeocodingProgress | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
@@ -84,7 +92,22 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
   };
 
   const handleFile = async (file: File) => {
+    setErrorMsg('');
+    setSelectedFileName(file.name);
+
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) {
+      const workbookInfo = await loadLocalWorkbookFromArrayBuffer(await file.arrayBuffer(), file.name);
+      localWorkbookRef.current = workbookInfo;
+      setFileTabs(workbookInfo.tabs);
+      setSelectedFileTab(workbookInfo.tabs[0] ?? '');
+      return;
+    }
+
     const text = await file.text();
+    localWorkbookRef.current = null;
+    setFileTabs([]);
+    setSelectedFileTab('');
     parseSheet(text, { workbookName: file.name, tabName: file.name });
   };
 
@@ -122,6 +145,22 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
     } catch (e) {
       setState('error');
       setErrorMsg(e instanceof Error ? e.message : 'Failed to read the selected tab.');
+    }
+  };
+
+  const handleParseSelectedFileTab = async () => {
+    const workbookInfo = localWorkbookRef.current;
+    if (!workbookInfo || !selectedFileTab) return;
+
+    try {
+      const csvText = await workbookSheetToCsv(workbookInfo.workbook, selectedFileTab);
+      parseSheet(csvText, {
+        workbookName: workbookInfo.workbookName || selectedFileName,
+        tabName: selectedFileTab,
+      });
+    } catch (e) {
+      setState('error');
+      setErrorMsg(e instanceof Error ? e.message : 'Failed to read the selected workbook tab.');
     }
   };
 
@@ -191,7 +230,11 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
     setGoogleSheetUrl('');
     setAvailableTabs([]);
     setSelectedTab('');
+    setSelectedFileName('');
+    setFileTabs([]);
+    setSelectedFileTab('');
     workbookRef.current = null;
+    localWorkbookRef.current = null;
     if (inputRef.current) inputRef.current.value = '';
   };
 
@@ -301,21 +344,51 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
             >
               <div className="text-3xl">🗂️</div>
               <p className="mt-2 text-sm font-medium text-gray-600">
-                Drop the weekly tab CSV here, or click to browse
+                Drop the weekly tab file here, or click to browse
               </p>
               <p className="mt-1 text-xs text-gray-400">
-                Export the Google Sheet tab as CSV if you want an offline fallback.
+                Supports `.xlsx`, `.xls`, and `.csv`.
               </p>
               <input
                 ref={inputRef}
                 type="file"
-                accept=".csv,text/csv"
+                accept=".xlsx,.xls,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) void handleFile(file);
                 }}
               />
+            </div>
+          )}
+
+          {importMode === 'file' && fileTabs.length > 0 && (
+            <div className="border-t border-gray-200 bg-gray-50 p-4 space-y-2">
+              <p className="text-xs font-medium text-gray-600">
+                Workbook loaded: <span className="font-semibold">{selectedFileName}</span>
+              </p>
+              <div className="flex gap-2">
+                <select
+                  value={selectedFileTab}
+                  onChange={(e) => setSelectedFileTab(e.target.value)}
+                  className="input flex-1"
+                >
+                  {fileTabs.map((tabName) => (
+                    <option key={tabName} value={tabName}>{tabName}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => { void handleParseSelectedFileTab(); }}
+                  disabled={!selectedFileTab}
+                  className="btn-primary whitespace-nowrap"
+                >
+                  Parse Tab
+                </button>
+              </div>
+              <p className="text-xs text-gray-400">
+                Choose the March/April-style tab inside the workbook.
+              </p>
             </div>
           )}
 

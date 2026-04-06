@@ -8,6 +8,12 @@ export interface GoogleSheetWorkbook {
   tabs: string[];
 }
 
+export interface LocalWorkbook {
+  workbook: WorkBook;
+  workbookName?: string;
+  tabs: string[];
+}
+
 export function extractSpreadsheetId(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
@@ -44,6 +50,20 @@ export async function loadGoogleSheetWorkbook(input: string): Promise<GoogleShee
     spreadsheetUrl: buildSpreadsheetUrl(spreadsheetId),
     workbook,
     workbookName: workbook.Props?.Title,
+    tabs: [...workbook.SheetNames],
+  };
+}
+
+export async function loadLocalWorkbookFromArrayBuffer(
+  arrayBuffer: ArrayBuffer,
+  workbookName?: string
+): Promise<LocalWorkbook> {
+  const XLSX = await import('xlsx');
+  const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+
+  return {
+    workbook,
+    workbookName: workbookName || workbook.Props?.Title,
     tabs: [...workbook.SheetNames],
   };
 }
