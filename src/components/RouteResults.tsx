@@ -1,12 +1,14 @@
 import { useState } from 'react';
-import type { RouteResult, VolunteerRouteResult } from '../types';
+import type { RouteResult, VolunteerRouteResult, WeeklySheetContext } from '../types';
 import RouteCard from './RouteCard';
 import { sendTextBelt } from '../utils/sms';
+import { exportWeeklySheetWorkbook } from '../utils/weeklySheetExport';
 
 interface VolunteerResultsProps {
   mode: 'coordinator';
   results: VolunteerRouteResult[];
   textBeltKey?: string;
+  weeklySheet?: WeeklySheetContext;
   onReset: () => void;
 }
 
@@ -21,6 +23,7 @@ type RouteResultsProps = VolunteerResultsProps | SingleResultProps;
 export default function RouteResults(props: RouteResultsProps) {
   const [sendAllState, setSendAllState] = useState<'idle' | 'sending' | 'done'>('idle');
   const [sendAllSummary, setSendAllSummary] = useState('');
+  const [exportState, setExportState] = useState<'idle' | 'exporting' | 'done'>('idle');
 
   const handleSendAll = async () => {
     if (props.mode !== 'coordinator') return;
@@ -61,7 +64,7 @@ export default function RouteResults(props: RouteResultsProps) {
   };
 
   if (props.mode === 'coordinator') {
-    const { results, textBeltKey, onReset } = props as VolunteerResultsProps;
+    const { results, textBeltKey, weeklySheet, onReset } = props as VolunteerResultsProps;
     const phoneCount = results.filter((r) => r.volunteer.phone && r.route).length;
 
     return (
@@ -71,6 +74,28 @@ export default function RouteResults(props: RouteResultsProps) {
             {results.length} Routes Generated
           </h2>
           <div className="flex items-center gap-2">
+            {weeklySheet && (
+              <button
+                type="button"
+                onClick={async () => {
+                  setExportState('exporting');
+                  try {
+                    await exportWeeklySheetWorkbook(results, weeklySheet);
+                    setExportState('done');
+                  } catch {
+                    setExportState('idle');
+                  }
+                }}
+                disabled={exportState === 'exporting'}
+                className="btn-secondary text-xs py-1.5 px-3"
+              >
+                {exportState === 'exporting'
+                  ? 'Preparing Export...'
+                  : exportState === 'done'
+                  ? 'Downloaded Export'
+                  : 'Download Clean Sheet'}
+              </button>
+            )}
             {textBeltKey && phoneCount > 0 && (
               <button
                 type="button"

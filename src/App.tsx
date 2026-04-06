@@ -2,10 +2,10 @@ import { useState, useEffect, useCallback } from 'react';
 import type {
   AppMode,
   GeocodedAddress,
-  PriorDeliveryAssignment,
   RouteResult,
   VolunteerEntry,
   VolunteerRouteResult,
+  WeeklySheetContext,
 } from './types';
 import { loadMapsApi, geocodeAddress, geocodeNeighborhood } from './utils/maps';
 import { computeVolunteerRoute, computeMultiVolunteerRoutes, computeNeighborhoodRoutes } from './utils/routing';
@@ -67,7 +67,7 @@ export default function App() {
   // Coordinator state
   const [deliveryPool, setDeliveryPool] = useState<GeocodedAddress[]>([]);
   const [coordinatorInputMode, setCoordinatorInputMode] = useState<'addresses' | 'sheet'>('addresses');
-  const [priorAssignments, setPriorAssignments] = useState<PriorDeliveryAssignment[]>([]);
+  const [weeklySheetContext, setWeeklySheetContext] = useState<WeeklySheetContext | null>(null);
   const [numVolunteers, setNumVolunteers] = useState(2);
   const [volunteers, setVolunteers] = useState<VolunteerEntry[]>([]);
   const [coordResults, setCoordResults] = useState<VolunteerRouteResult[] | null>(null);
@@ -132,7 +132,7 @@ export default function App() {
 
   const handleCoordinatorAddressesLoaded = useCallback((addresses: GeocodedAddress[]) => {
     setCoordinatorInputMode('addresses');
-    setPriorAssignments([]);
+    setWeeklySheetContext(null);
     setDeliveryPool(addresses);
     setCoordResults(null);
     setError('');
@@ -141,10 +141,10 @@ export default function App() {
   const handleSpreadsheetLoaded = useCallback((payload: {
     deliveries: GeocodedAddress[];
     volunteers: VolunteerEntry[];
-    priorAssignments: PriorDeliveryAssignment[];
+    weeklySheet: WeeklySheetContext;
   }) => {
     setCoordinatorInputMode('sheet');
-    setPriorAssignments(payload.priorAssignments);
+    setWeeklySheetContext(payload.weeklySheet);
     setDeliveryPool(payload.deliveries);
     setVolunteers(payload.volunteers);
     setNumVolunteers(payload.volunteers.length);
@@ -228,7 +228,12 @@ export default function App() {
       }
 
       const results = coordinatorInputMode === 'sheet'
-        ? await computeNeighborhoodRoutes(hydratedVolunteers, nonprofitAddress, deliveryPool, priorAssignments)
+        ? await computeNeighborhoodRoutes(
+            hydratedVolunteers,
+            nonprofitAddress,
+            deliveryPool,
+            weeklySheetContext?.priorAssignments ?? []
+          )
         : await computeMultiVolunteerRoutes(hydratedVolunteers, nonprofitAddress, deliveryPool);
       setCoordResults(results);
     } catch (e) {
@@ -440,7 +445,13 @@ export default function App() {
             )}
 
             {mode === 'coordinator' && coordResults && (
-              <RouteResults mode="coordinator" results={coordResults} textBeltKey={textBeltKey || undefined} onReset={resetCoord} />
+              <RouteResults
+                mode="coordinator"
+                results={coordResults}
+                textBeltKey={textBeltKey || undefined}
+                weeklySheet={coordinatorInputMode === 'sheet' ? weeklySheetContext ?? undefined : undefined}
+                onReset={resetCoord}
+              />
             )}
 
             {/* ── VOLUNTEER MODE ── */}

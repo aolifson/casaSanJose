@@ -35,6 +35,17 @@ export interface ParsedDeliverySheet {
   drivers: DeliverySheetDriver[];
 }
 
+export interface WeeklySheetSource {
+  spreadsheetId?: string;
+  spreadsheetUrl?: string;
+  workbookName?: string;
+  tabName?: string;
+}
+
+export interface WeeklySheetContext extends ParsedDeliverySheet {
+  source?: WeeklySheetSource;
+}
+
 export interface RouteStop {
   order: number;
   address: GeocodedAddress;
