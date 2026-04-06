@@ -9,6 +9,14 @@ const PITTSBURGH_BOUNDS: google.maps.LatLngBoundsLiteral = {
   west: -80.40,
 };
 
+const NEIGHBORHOOD_ZIP_OVERRIDES: Record<string, string> = {
+  uptown: '15219',
+};
+
+const NEIGHBORHOOD_NAME_ALIASES: Record<string, string> = {
+  'mt lebo': 'Mt Lebanon',
+};
+
 /**
  * Load the Google Maps JavaScript SDK once. Idempotent.
  */
@@ -89,6 +97,15 @@ function normalizeNeighborhood(raw: string): string {
   return raw.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function canonicalizeNeighborhood(raw: string): string {
+  const normalized = normalizeNeighborhood(raw);
+  return NEIGHBORHOOD_NAME_ALIASES[normalized.toLowerCase()] ?? normalized;
+}
+
+function getNeighborhoodZipOverride(neighborhood: string): string | undefined {
+  return NEIGHBORHOOD_ZIP_OVERRIDES[canonicalizeNeighborhood(neighborhood).toLowerCase()];
+}
+
 export async function geocodeZipCode(zipCode: string): Promise<GeocodedAddress> {
   const geocoder = new google.maps.Geocoder();
   const normalizedZip = zipCode.replace(/\D/g, '').slice(0, 5);
@@ -107,18 +124,28 @@ export async function geocodeZipCode(zipCode: string): Promise<GeocodedAddress> 
 
 export async function geocodeNeighborhood(neighborhood: string): Promise<GeocodedAddress> {
   const geocoder = new google.maps.Geocoder();
-  const cleaned = normalizeNeighborhood(neighborhood);
+  const cleaned = canonicalizeNeighborhood(neighborhood);
+  const zipOverride = getNeighborhoodZipOverride(cleaned);
 
-  return geocodeWithRequest(
+  const geocoded = await geocodeWithRequest(
     geocoder,
     neighborhood,
     {
-      address: `${cleaned}, Pennsylvania`,
+      address: zipOverride ? `${cleaned}, Pittsburgh, PA ${zipOverride}` : `${cleaned}, Pennsylvania`,
       componentRestrictions: { country: 'US', administrativeArea: 'PA' },
       bounds: PITTSBURGH_BOUNDS,
     },
     'neighborhood'
   );
+
+  if (zipOverride) {
+    return {
+      ...geocoded,
+      postalCode: zipOverride,
+    };
+  }
+
+  return geocoded;
 }
 
 async function geocodeBatch(
