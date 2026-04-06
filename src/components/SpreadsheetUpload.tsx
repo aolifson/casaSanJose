@@ -249,7 +249,7 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
           <div className="flex border-b border-gray-200">
             {([
               ['google-sheet', 'Google Sheet'],
-              ['file', 'Upload CSV'],
+              ['file', 'Upload File'],
               ['paste', 'Paste CSV'],
             ] as Array<[ImportMode, string]>).map(([mode, label]) => (
               <button
@@ -344,10 +344,10 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
             >
               <div className="text-3xl">🗂️</div>
               <p className="mt-2 text-sm font-medium text-gray-600">
-                Drop the weekly tab file here, or click to browse
+                Drop the weekly sheet file here, or click to browse
               </p>
               <p className="mt-1 text-xs text-gray-400">
-                Supports `.xlsx`, `.xls`, and `.csv`.
+                Supports Excel workbooks (`.xlsx`, `.xls`) and CSV files.
               </p>
               <input
                 ref={inputRef}

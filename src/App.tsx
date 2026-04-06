@@ -15,7 +15,6 @@ import TabNav from './components/TabNav';
 import ApiKeyInput from './components/ApiKeyInput';
 import AddressInput from './components/AddressInput';
 import AddressList from './components/AddressList';
-import FileUpload from './components/FileUpload';
 import SpreadsheetUpload from './components/SpreadsheetUpload';
 import VolunteerList from './components/VolunteerList';
 import ImageAddressInput from './components/ImageAddressInput';
@@ -128,14 +127,6 @@ export default function App() {
   const handleVolunteerHomeChange = useCallback((addr: GeocodedAddress | null) => {
     setVolunteerHome(addr);
     saveToStorage('csj_vol_home', addr);
-  }, []);
-
-  const handleCoordinatorAddressesLoaded = useCallback((addresses: GeocodedAddress[]) => {
-    setCoordinatorInputMode('addresses');
-    setWeeklySheetContext(null);
-    setDeliveryPool(addresses);
-    setCoordResults(null);
-    setError('');
   }, []);
 
   const handleSpreadsheetLoaded = useCallback((payload: {
@@ -391,18 +382,8 @@ export default function App() {
               <div className="space-y-4">
                 {/* Step 1: upload delivery pool */}
                 <div className="card p-4">
-                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Delivery Data</p>
-                  <div className="space-y-4">
-                    <FileUpload onAddressesLoaded={handleCoordinatorAddressesLoaded} />
-                    <div className="border-t border-dashed border-gray-200 pt-4">
-                      <SpreadsheetUpload onSheetLoaded={handleSpreadsheetLoaded} />
-                    </div>
-                  </div>
-                  {deliveryPool.length > 0 && coordinatorInputMode === 'addresses' && (
-                    <p className="mt-3 text-xs font-medium text-green-700">
-                      ✓ {deliveryPool.length} delivery addresses ready
-                    </p>
-                  )}
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Upload Weekly Sheet</p>
+                  <SpreadsheetUpload onSheetLoaded={handleSpreadsheetLoaded} />
                   {deliveryPool.length > 0 && coordinatorInputMode === 'sheet' && (
                     <p className="mt-3 text-xs font-medium text-green-700">
                       ✓ {deliveryPool.length} delivery ZIPs and {numVolunteers} driver neighborhoods ready
