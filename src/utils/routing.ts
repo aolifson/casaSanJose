@@ -14,6 +14,8 @@ import {
 } from './maps';
 
 const MAX_DELIVERY_WAYPOINTS = 23; // Google Directions allows 25 waypoints; nonprofit uses 1
+const LOAD_PENALTY_PER_STOP = 0.01;
+const ZIP_SPLIT_IMPROVEMENT_THRESHOLD = 0.03;
 
 /**
  * Use Case 2 — Volunteer Mode
@@ -105,12 +107,23 @@ export async function computeNeighborhoodRoutes(
   }
 
   const remainingDeliveries = availableDeliveries.filter((delivery) => unassignedIndexes.has(delivery.index));
-  for (const delivery of remainingDeliveries) {
-    const volunteerIndex = findClosestVolunteerIndex(delivery.address, activeVolunteers, remainingCapacity, buckets);
-    if (volunteerIndex === -1) continue;
+  const remainingZipGroups = groupDeliveriesByZip(remainingDeliveries);
 
-    buckets[volunteerIndex].push(delivery.address);
-    remainingCapacity[volunteerIndex] -= 1;
+  for (const zipGroup of remainingZipGroups) {
+    for (const delivery of zipGroup) {
+      const volunteerIndex = findBestVolunteerIndexForDelivery(
+        delivery.address,
+        delivery.zipCode,
+        activeVolunteers,
+        nonprofit,
+        remainingCapacity,
+        buckets
+      );
+      if (volunteerIndex === -1) continue;
+
+      buckets[volunteerIndex].push(delivery.address);
+      remainingCapacity[volunteerIndex] -= 1;
+    }
   }
 
   return buildRoutesForBuckets(activeVolunteers, nonprofit, buckets);
@@ -258,23 +271,53 @@ function distanceBetween(a: GeocodedAddress, b: GeocodedAddress): number {
   return Math.hypot(a.lat - b.lat, a.lng - b.lng);
 }
 
-function findClosestVolunteerIndex(
+function groupDeliveriesByZip<
+  T extends {
+    address: GeocodedAddress;
+    zipCode: string;
+  },
+>(deliveries: T[]): T[][] {
+  const groups = new Map<string, T[]>();
+
+  for (const delivery of deliveries) {
+    const key = delivery.zipCode || `${delivery.address.lat},${delivery.address.lng}`;
+    const existing = groups.get(key) ?? [];
+    existing.push(delivery);
+    groups.set(key, existing);
+  }
+
+  return [...groups.values()].sort((a, b) => b.length - a.length);
+}
+
+function scoreVolunteerForDelivery(
+  delivery: GeocodedAddress,
+  volunteer: VolunteerEntry,
+  nonprofit: GeocodedAddress,
+  bucket: GeocodedAddress[]
+): number {
+  const anchor = volunteer.homeAddress ?? nonprofit;
+  const anchors = bucket.length > 0 ? [anchor, ...bucket] : [anchor];
+  const closestAssignedStop = Math.min(...anchors.map((candidate) => distanceBetween(candidate, delivery)));
+  const loadPenalty = bucket.length * LOAD_PENALTY_PER_STOP;
+  return closestAssignedStop + loadPenalty;
+}
+
+function findBestScoredVolunteer(
   delivery: GeocodedAddress,
   volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
   remainingCapacity: number[],
-  buckets: GeocodedAddress[][]
-): number {
+  buckets: GeocodedAddress[][],
+  candidateIndexes?: number[]
+): { index: number; score: number } {
   let bestIndex = -1;
   let bestScore = Infinity;
 
-  for (let i = 0; i < volunteers.length; i++) {
+  const indexes = candidateIndexes ?? volunteers.map((_, index) => index);
+
+  for (const i of indexes) {
     if (remainingCapacity[i] <= 0) continue;
-
-    const anchor = volunteers[i].homeAddress;
-    if (!anchor) continue;
-
-    const loadPenalty = buckets[i].length * 0.01;
-    const score = distanceBetween(anchor, delivery) + loadPenalty;
+    const score = scoreVolunteerForDelivery(delivery, volunteers[i], nonprofit, buckets[i]);
 
     if (score < bestScore) {
       bestScore = score;
@@ -282,13 +325,64 @@ function findClosestVolunteerIndex(
     }
   }
 
-  if (bestIndex !== -1) return bestIndex;
+  return { index: bestIndex, score: bestScore };
+}
 
-  for (let i = 0; i < remainingCapacity.length; i++) {
-    if (remainingCapacity[i] > 0) return i;
+function findZipOwnerIndexes(zipCode: string, buckets: GeocodedAddress[][]): number[] {
+  const owners: number[] = [];
+
+  for (let i = 0; i < buckets.length; i++) {
+    if (buckets[i].some((address) => extractZipCode(address) === zipCode)) {
+      owners.push(i);
+    }
   }
 
-  return -1;
+  return owners;
+}
+
+function findBestVolunteerIndexForDelivery(
+  delivery: GeocodedAddress,
+  zipCode: string,
+  volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
+  remainingCapacity: number[],
+  buckets: GeocodedAddress[][]
+): number {
+  const bestOverall = findBestScoredVolunteer(
+    delivery,
+    volunteers,
+    nonprofit,
+    remainingCapacity,
+    buckets
+  );
+
+  if (bestOverall.index === -1) {
+    return -1;
+  }
+
+  const zipOwners = findZipOwnerIndexes(zipCode, buckets);
+  if (zipOwners.length === 0) {
+    return bestOverall.index;
+  }
+
+  const bestExistingOwner = findBestScoredVolunteer(
+    delivery,
+    volunteers,
+    nonprofit,
+    remainingCapacity,
+    buckets,
+    zipOwners
+  );
+
+  if (bestExistingOwner.index === -1 || bestExistingOwner.index === bestOverall.index) {
+    return bestOverall.index;
+  }
+
+  if (bestOverall.score + ZIP_SPLIT_IMPROVEMENT_THRESHOLD < bestExistingOwner.score) {
+    return bestOverall.index;
+  }
+
+  return bestExistingOwner.index;
 }
 
 async function buildRoutesForBuckets(
