@@ -131,14 +131,17 @@ export default function App() {
 
   const handleSpreadsheetLoaded = useCallback((payload: {
     deliveries: GeocodedAddress[];
-    volunteers: VolunteerEntry[];
-    weeklySheet: WeeklySheetContext;
+    importKind: 'weekly-sheet' | 'zip-list';
+    volunteers?: VolunteerEntry[];
+    weeklySheet?: WeeklySheetContext;
   }) => {
-    setCoordinatorInputMode('sheet');
-    setWeeklySheetContext(payload.weeklySheet);
+    setCoordinatorInputMode(payload.importKind === 'weekly-sheet' ? 'sheet' : 'addresses');
+    setWeeklySheetContext(payload.importKind === 'weekly-sheet' ? payload.weeklySheet ?? null : null);
     setDeliveryPool(payload.deliveries);
-    setVolunteers(payload.volunteers);
-    setNumVolunteers(payload.volunteers.length);
+    if (payload.importKind === 'weekly-sheet' && payload.volunteers) {
+      setVolunteers(payload.volunteers);
+      setNumVolunteers(payload.volunteers.length);
+    }
     setCoordResults(null);
     setError('');
   }, []);
@@ -382,7 +385,7 @@ export default function App() {
               <div className="space-y-4">
                 {/* Step 1: upload delivery pool */}
                 <div className="card p-4">
-                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Upload Weekly Sheet</p>
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Import Deliveries</p>
                   <SpreadsheetUpload onSheetLoaded={handleSpreadsheetLoaded} />
                   {deliveryPool.length > 0 && coordinatorInputMode === 'sheet' && (
                     <p className="mt-3 text-xs font-medium text-green-700">

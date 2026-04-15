@@ -126,6 +126,29 @@ export function parseDeliverySheetCsv(text: string): ParsedDeliverySheet {
   };
 }
 
+export function parseZipCodeList(text: string): string[] {
+  const matches = [...text.matchAll(/(\d{5})(?:\s*[xX*]\s*(\d+))?/g)];
+  if (matches.length === 0) {
+    throw new Error(
+      'Could not find any ZIP codes. Paste a Casa San Jose weekly sheet export or a list like 15205, 15205x2, 15221 x3.'
+    );
+  }
+
+  const zipCodes: string[] = [];
+
+  for (const match of matches) {
+    const zipCode = match[1];
+    const count = Number.parseInt(match[2] ?? '1', 10);
+    const safeCount = Number.isFinite(count) && count > 0 ? count : 1;
+
+    for (let i = 0; i < safeCount; i++) {
+      zipCodes.push(zipCode);
+    }
+  }
+
+  return zipCodes;
+}
+
 function extractAddressFromRow(row: Record<string, string>): string | null {
   const keys = Object.keys(row);
 

@@ -6,7 +6,7 @@ import type {
   WeeklySheetContext,
   WeeklySheetSource,
 } from '../types';
-import { parseDeliverySheetCsv } from '../utils/fileParser';
+import { parseDeliverySheetCsv, parseZipCodeList } from '../utils/fileParser';
 import {
   loadGoogleSheetWorkbook,
   loadLocalWorkbookFromArrayBuffer,
@@ -17,13 +17,15 @@ import { geocodeNeighborhood, geocodeZipCode } from '../utils/maps';
 interface SpreadsheetUploadProps {
   onSheetLoaded: (payload: {
     deliveries: GeocodedAddress[];
-    volunteers: VolunteerEntry[];
-    weeklySheet: WeeklySheetContext;
+    importKind: 'weekly-sheet' | 'zip-list';
+    volunteers?: VolunteerEntry[];
+    weeklySheet?: WeeklySheetContext;
   }) => void;
 }
 
 type UploadState = 'idle' | 'parsed' | 'geocoding' | 'done' | 'error';
 type ImportMode = 'google-sheet' | 'file' | 'paste';
+type ParsedImportKind = 'weekly-sheet' | 'zip-list';
 
 async function geocodeFixedList(
   labels: string[],
@@ -68,6 +70,7 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
   const [fileTabs, setFileTabs] = useState<string[]>([]);
   const [selectedFileTab, setSelectedFileTab] = useState('');
   const [summary, setSummary] = useState<WeeklySheetContext | null>(null);
+  const [parsedImportKind, setParsedImportKind] = useState<ParsedImportKind>('weekly-sheet');
   const [progress, setProgress] = useState<GeocodingProgress | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [isDragging, setIsDragging] = useState(false);
@@ -83,11 +86,24 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
         ...parsed,
         source,
       });
+      setParsedImportKind('weekly-sheet');
       setState('parsed');
     } catch (e) {
-      setSummary(null);
-      setState('error');
-      setErrorMsg(e instanceof Error ? e.message : 'Failed to parse spreadsheet.');
+      try {
+        const deliveryZipCodes = parseZipCodeList(text);
+        setSummary({
+          deliveryZipCodes,
+          priorAssignments: [],
+          drivers: [],
+          source,
+        });
+        setParsedImportKind('zip-list');
+        setState('parsed');
+      } catch {
+        setSummary(null);
+        setState('error');
+        setErrorMsg(e instanceof Error ? e.message : 'Failed to parse spreadsheet.');
+      }
     }
   };
 
@@ -208,11 +224,21 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
         };
       });
 
-      onSheetLoaded({
-        deliveries: zipResults.filter((value): value is GeocodedAddress => value !== null),
-        volunteers,
-        weeklySheet: summary,
-      });
+      const deliveries = zipResults.filter((value): value is GeocodedAddress => value !== null);
+
+      if (parsedImportKind === 'zip-list') {
+        onSheetLoaded({
+          deliveries,
+          importKind: 'zip-list',
+        });
+      } else {
+        onSheetLoaded({
+          deliveries,
+          importKind: 'weekly-sheet',
+          volunteers,
+          weeklySheet: summary,
+        });
+      }
 
       setState('done');
     } catch (e) {
@@ -233,6 +259,7 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
     setSelectedFileName('');
     setFileTabs([]);
     setSelectedFileTab('');
+    setParsedImportKind('weekly-sheet');
     workbookRef.current = null;
     localWorkbookRef.current = null;
     if (inputRef.current) inputRef.current.value = '';
@@ -344,7 +371,7 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
             >
               <div className="text-3xl">🗂️</div>
               <p className="mt-2 text-sm font-medium text-gray-600">
-                Drop the weekly sheet file here, or click to browse
+                Drop a weekly sheet or ZIP-list file here, or click to browse
               </p>
               <p className="mt-1 text-xs text-gray-400">
                 Supports Excel workbooks (`.xlsx`, `.xls`) and CSV files.
@@ -394,11 +421,11 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
 
           {importMode === 'paste' && (
             <div className="bg-gray-50 p-3 space-y-2">
-              <p className="text-xs font-medium text-gray-600">Paste the exported CSV text</p>
+              <p className="text-xs font-medium text-gray-600">Paste a weekly-sheet export or ZIP list</p>
               <textarea
                 value={pasteText}
                 onChange={(e) => setPasteText(e.target.value)}
-                placeholder="Paste the March/April tab CSV export here..."
+                placeholder={'Paste the March/April tab CSV export here,\nor a ZIP list like:\n15205, 15205x2, 15221 x3'}
                 rows={6}
                 className="input w-full resize-none font-mono text-xs"
               />
@@ -408,7 +435,7 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
                 disabled={!pasteText.trim()}
                 className="btn-primary w-full"
               >
-                Parse Weekly Sheet
+                Parse Input
               </button>
             </div>
           )}
@@ -425,11 +452,17 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
         <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-700">
-                Found <span className="font-bold text-amber-700">{summary.deliveryZipCodes.length}</span> delivery ZIPs,{' '}
-                <span className="font-bold text-amber-700">{summary.drivers.length}</span> drivers, and{' '}
-                <span className="font-bold text-amber-700">{summary.priorAssignments.length}</span> prior assignments
-              </p>
+              {parsedImportKind === 'zip-list' ? (
+                <p className="text-sm font-medium text-gray-700">
+                  Found <span className="font-bold text-amber-700">{summary.deliveryZipCodes.length}</span> delivery ZIP stops
+                </p>
+              ) : (
+                <p className="text-sm font-medium text-gray-700">
+                  Found <span className="font-bold text-amber-700">{summary.deliveryZipCodes.length}</span> delivery ZIPs,{' '}
+                  <span className="font-bold text-amber-700">{summary.drivers.length}</span> drivers, and{' '}
+                  <span className="font-bold text-amber-700">{summary.priorAssignments.length}</span> prior assignments
+                </p>
+              )}
               {summary.source?.tabName && (
                 <p className="mt-1 text-xs text-gray-500">
                   Source tab: <span className="font-medium">{summary.source.tabName}</span>
@@ -442,10 +475,10 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
           </div>
 
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            Routes will be approximate until the exact delivery addresses are added later, because the sheet only contains ZIP codes at this stage.
+            Routes will be approximate until the exact delivery addresses are added later, because this import only contains ZIP codes at this stage.
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className={`grid gap-3 ${parsedImportKind === 'weekly-sheet' ? 'md:grid-cols-2' : ''}`}>
             <div>
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">This Week ZIPs</p>
               <ul className="max-h-28 space-y-1 overflow-y-auto text-xs text-gray-600">
@@ -460,20 +493,24 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
               </ul>
             </div>
 
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Drivers</p>
-              <ul className="max-h-28 space-y-1 overflow-y-auto text-xs text-gray-600">
-                {summary.drivers.map((driver) => (
-                  <li key={driver.name} className="rounded bg-white px-2 py-1 shadow-sm">
-                    {driver.name} · {driver.neighborhood}
-                  </li>
-                ))}
-              </ul>
-            </div>
+            {parsedImportKind === 'weekly-sheet' && (
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Drivers</p>
+                <ul className="max-h-28 space-y-1 overflow-y-auto text-xs text-gray-600">
+                  {summary.drivers.map((driver) => (
+                    <li key={driver.name} className="rounded bg-white px-2 py-1 shadow-sm">
+                      {driver.name} · {driver.neighborhood}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           <button type="button" onClick={handleGeocode} className="btn-primary w-full">
-            Confirm & Geocode ZIPs / Neighborhoods
+            {parsedImportKind === 'weekly-sheet'
+              ? 'Confirm & Geocode ZIPs / Neighborhoods'
+              : 'Confirm & Geocode ZIPs'}
           </button>
         </div>
       )}
@@ -500,9 +537,15 @@ export default function SpreadsheetUpload({ onSheetLoaded }: SpreadsheetUploadPr
       {state === 'done' && summary && (
         <div className="flex items-center justify-between rounded-xl border border-green-200 bg-green-50 px-4 py-3">
           <div>
-            <p className="text-sm font-medium text-green-800">
-              ✓ Weekly sheet loaded for {summary.drivers.length} drivers
-            </p>
+            {parsedImportKind === 'weekly-sheet' ? (
+              <p className="text-sm font-medium text-green-800">
+                ✓ Weekly sheet loaded for {summary.drivers.length} drivers
+              </p>
+            ) : (
+              <p className="text-sm font-medium text-green-800">
+                ✓ ZIP list loaded with {summary.deliveryZipCodes.length} delivery stops
+              </p>
+            )}
             {summary.source?.tabName && (
               <p className="text-xs text-green-700">
                 Ready from {summary.source.tabName}
