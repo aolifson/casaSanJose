@@ -92,7 +92,7 @@ function buildExportRows(
         lastWeekNeighborhood: prior?.neighborhood ?? '',
         newClient: prior ? '' : 'Yes',
         comments: '',
-        routeLink: route.googleMapsUrl,
+        routeLink: index === 0 ? route.googleMapsUrl : '',
       });
     });
   });

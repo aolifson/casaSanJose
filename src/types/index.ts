@@ -16,6 +16,7 @@ export interface VolunteerEntry {
   homeNeighborhood?: string;
   homeZipCode?: string;
   numStops: number;
+  maxRouteMinutes?: number;
 }
 
 export interface PriorDeliveryAssignment {

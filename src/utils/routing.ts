@@ -16,6 +16,10 @@ import {
 const MAX_DELIVERY_WAYPOINTS = 23; // Google Directions allows 25 waypoints; nonprofit uses 1
 const LOAD_PENALTY_PER_STOP = 0.01;
 const ZIP_SPLIT_IMPROVEMENT_THRESHOLD = 0.03;
+const DELIVERY_TIME_BUFFER_MINUTES = 15;
+const MAX_ROUTE_REBALANCE_ATTEMPTS = 24;
+const MOVE_CANDIDATE_COUNT = 5;
+const RECIPIENT_CANDIDATE_COUNT = 4;
 
 /**
  * Use Case 2 — Volunteer Mode
@@ -67,7 +71,8 @@ export async function computeMultiVolunteerRoutes(
   const buckets: GeocodedAddress[][] = Array.from({ length: numVols }, () => []);
   sorted.forEach((addr, i) => buckets[i % numVols].push(addr));
 
-  return buildRoutesForBuckets(volunteers, nonprofit, buckets);
+  const rebalancedBuckets = await rebalanceBucketsForRouteLimits(volunteers, nonprofit, buckets);
+  return buildRoutesForBuckets(volunteers, nonprofit, rebalancedBuckets);
 }
 
 export async function computeNeighborhoodRoutes(
@@ -126,7 +131,8 @@ export async function computeNeighborhoodRoutes(
     }
   }
 
-  return buildRoutesForBuckets(activeVolunteers, nonprofit, buckets);
+  const rebalancedBuckets = await rebalanceBucketsForRouteLimits(activeVolunteers, nonprofit, buckets);
+  return buildRoutesForBuckets(activeVolunteers, nonprofit, rebalancedBuckets);
 }
 
 /**
@@ -385,42 +391,290 @@ function findBestVolunteerIndexForDelivery(
   return bestExistingOwner.index;
 }
 
+function buildAddressKey(address: GeocodedAddress): string {
+  return address.placeId
+    || `${address.formatted}|${address.postalCode ?? ''}|${address.lat.toFixed(5)}|${address.lng.toFixed(5)}`;
+}
+
+function buildBucketCacheKey(volunteer: VolunteerEntry, bucket: GeocodedAddress[]): string {
+  const volunteerKey = volunteer.homeAddress?.placeId
+    || volunteer.homeAddress?.formatted
+    || volunteer.homeNeighborhood
+    || volunteer.id;
+  const bucketKey = bucket
+    .map(buildAddressKey)
+    .sort()
+    .join('||');
+  return `${volunteer.id}|${volunteerKey}|${bucketKey}`;
+}
+
+function getVolunteerRouteTargetMinutes(volunteer: VolunteerEntry): number {
+  if (!volunteer.maxRouteMinutes || !Number.isFinite(volunteer.maxRouteMinutes)) {
+    return Infinity;
+  }
+
+  return Math.max(0, volunteer.maxRouteMinutes - DELIVERY_TIME_BUFFER_MINUTES);
+}
+
+function getRouteDurationMinutes(result: VolunteerRouteResult): number {
+  return result.route?.totalDurationMinutes ?? 0;
+}
+
+function getRouteOverflowMinutes(volunteer: VolunteerEntry, result: VolunteerRouteResult): number {
+  const target = getVolunteerRouteTargetMinutes(volunteer);
+  if (!Number.isFinite(target) || !result.route) return 0;
+  return Math.max(0, result.route.totalDurationMinutes - target);
+}
+
+function removeDeliveryFromBucket(bucket: GeocodedAddress[], delivery: GeocodedAddress): GeocodedAddress[] | null {
+  const index = bucket.findIndex((candidate) => candidate === delivery);
+  if (index === -1) return null;
+
+  return [
+    ...bucket.slice(0, index),
+    ...bucket.slice(index + 1),
+  ];
+}
+
+function getMoveCandidateDeliveries(
+  volunteer: VolunteerEntry,
+  nonprofit: GeocodedAddress,
+  bucket: GeocodedAddress[],
+  result: VolunteerRouteResult
+): GeocodedAddress[] {
+  if (bucket.length === 0) return [];
+
+  const orderedDeliveries = result.route
+    ? result.route.stops.filter((stop) => !stop.isFixed).map((stop) => stop.address)
+    : [...bucket];
+  const routeTail = [...orderedDeliveries].reverse().slice(0, Math.min(3, orderedDeliveries.length));
+  const anchor = volunteer.homeAddress ?? nonprofit;
+  const farthest = [...bucket]
+    .sort((a, b) => distanceBetween(anchor, b) - distanceBetween(anchor, a))
+    .slice(0, Math.min(2, bucket.length));
+
+  const candidates: GeocodedAddress[] = [];
+  for (const candidate of [...routeTail, ...farthest]) {
+    if (!candidates.some((existing) => existing === candidate)) {
+      candidates.push(candidate);
+    }
+    if (candidates.length >= MOVE_CANDIDATE_COUNT) break;
+  }
+
+  return candidates.length > 0 ? candidates : [bucket[bucket.length - 1]];
+}
+
+function getRecipientCandidateIndexes(
+  donorIndex: number,
+  delivery: GeocodedAddress,
+  volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
+  buckets: GeocodedAddress[][]
+): number[] {
+  return volunteers
+    .map((_, index) => index)
+    .filter((index) => index !== donorIndex && buckets[index].length < MAX_DELIVERY_WAYPOINTS)
+    .sort((a, b) => {
+      const scoreA = scoreVolunteerForDelivery(delivery, volunteers[a], nonprofit, buckets[a]);
+      const scoreB = scoreVolunteerForDelivery(delivery, volunteers[b], nonprofit, buckets[b]);
+      return scoreA - scoreB;
+    })
+    .slice(0, RECIPIENT_CANDIDATE_COUNT);
+}
+
+async function computeRouteForVolunteerBucket(
+  volunteer: VolunteerEntry,
+  nonprofit: GeocodedAddress,
+  bucket: GeocodedAddress[],
+  cache: Map<string, VolunteerRouteResult>
+): Promise<VolunteerRouteResult> {
+  if (bucket.length === 0) {
+    return { volunteer, route: null };
+  }
+
+  const cacheKey = buildBucketCacheKey(volunteer, bucket);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  if (bucket.length > MAX_DELIVERY_WAYPOINTS) {
+    const result = {
+      volunteer,
+      route: null,
+      error: `Maximum ${MAX_DELIVERY_WAYPOINTS} delivery addresses allowed per route.`,
+    };
+    cache.set(cacheKey, result);
+    return result;
+  }
+
+  const origin = volunteer.homeAddress ?? nonprofit;
+  const destination = volunteer.homeAddress ?? nonprofit;
+
+  try {
+    const directionsResult = await getOptimizedDirections(nonprofit, destination, bucket);
+    const route = buildRouteResult(origin, destination, nonprofit, bucket, directionsResult);
+    const result = { volunteer, route };
+    cache.set(cacheKey, result);
+    return result;
+  } catch (e) {
+    const addressList = bucket.map((address) => address.formatted).join(', ');
+    const msg = e instanceof Error ? e.message : 'Unknown routing error';
+    const result = {
+      volunteer,
+      route: null,
+      error: `${msg}\n\nAssigned addresses: ${addressList}`,
+    };
+    cache.set(cacheKey, result);
+    return result;
+  }
+}
+
+async function computeRoutesForBuckets(
+  volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
+  buckets: GeocodedAddress[][],
+  cache: Map<string, VolunteerRouteResult>
+): Promise<VolunteerRouteResult[]> {
+  const results: VolunteerRouteResult[] = [];
+
+  for (let index = 0; index < volunteers.length; index++) {
+    results.push(await computeRouteForVolunteerBucket(volunteers[index], nonprofit, buckets[index], cache));
+  }
+
+  return results;
+}
+
+async function rebalanceBucketsForRouteLimits(
+  volunteers: VolunteerEntry[],
+  nonprofit: GeocodedAddress,
+  buckets: GeocodedAddress[][]
+): Promise<GeocodedAddress[][]> {
+  if (!volunteers.some((volunteer) => Number.isFinite(getVolunteerRouteTargetMinutes(volunteer)))) {
+    return buckets;
+  }
+
+  const cache = new Map<string, VolunteerRouteResult>();
+  const workingBuckets = buckets.map((bucket) => [...bucket]);
+  const currentRoutes = await computeRoutesForBuckets(volunteers, nonprofit, workingBuckets, cache);
+
+  for (let attempt = 0; attempt < MAX_ROUTE_REBALANCE_ATTEMPTS; attempt++) {
+    let donorIndex = -1;
+    let donorOverflow = 0;
+
+    for (let index = 0; index < volunteers.length; index++) {
+      const overflow = getRouteOverflowMinutes(volunteers[index], currentRoutes[index]);
+      if (overflow > donorOverflow && workingBuckets[index].length > 0) {
+        donorOverflow = overflow;
+        donorIndex = index;
+      }
+    }
+
+    if (donorIndex === -1 || donorOverflow <= 0) break;
+
+    const moveCandidates = getMoveCandidateDeliveries(
+      volunteers[donorIndex],
+      nonprofit,
+      workingBuckets[donorIndex],
+      currentRoutes[donorIndex]
+    );
+
+    const donorCurrent = currentRoutes[donorIndex];
+    let bestMove:
+      | {
+          donorIndex: number;
+          recipientIndex: number;
+          delivery: GeocodedAddress;
+          donorBucket: GeocodedAddress[];
+          recipientBucket: GeocodedAddress[];
+          donorResult: VolunteerRouteResult;
+          recipientResult: VolunteerRouteResult;
+          overflowAfter: number;
+          durationDelta: number;
+        }
+      | null = null;
+
+    for (const delivery of moveCandidates) {
+      const nextDonorBucket = removeDeliveryFromBucket(workingBuckets[donorIndex], delivery);
+      if (!nextDonorBucket) continue;
+
+      const donorResult = await computeRouteForVolunteerBucket(
+        volunteers[donorIndex],
+        nonprofit,
+        nextDonorBucket,
+        cache
+      );
+      const recipientIndexes = getRecipientCandidateIndexes(
+        donorIndex,
+        delivery,
+        volunteers,
+        nonprofit,
+        workingBuckets
+      );
+
+      for (const recipientIndex of recipientIndexes) {
+        const nextRecipientBucket = [...workingBuckets[recipientIndex], delivery];
+        const recipientResult = await computeRouteForVolunteerBucket(
+          volunteers[recipientIndex],
+          nonprofit,
+          nextRecipientBucket,
+          cache
+        );
+
+        if (recipientResult.error || donorResult.error) continue;
+
+        const overflowBefore =
+          getRouteOverflowMinutes(volunteers[donorIndex], donorCurrent)
+          + getRouteOverflowMinutes(volunteers[recipientIndex], currentRoutes[recipientIndex]);
+        const overflowAfter =
+          getRouteOverflowMinutes(volunteers[donorIndex], donorResult)
+          + getRouteOverflowMinutes(volunteers[recipientIndex], recipientResult);
+
+        if (overflowAfter >= overflowBefore) continue;
+
+        const durationDelta =
+          getRouteDurationMinutes(donorResult)
+          + getRouteDurationMinutes(recipientResult)
+          - getRouteDurationMinutes(donorCurrent)
+          - getRouteDurationMinutes(currentRoutes[recipientIndex]);
+
+        if (
+          !bestMove
+          || overflowAfter < bestMove.overflowAfter
+          || (overflowAfter === bestMove.overflowAfter && durationDelta < bestMove.durationDelta)
+        ) {
+          bestMove = {
+            donorIndex,
+            recipientIndex,
+            delivery,
+            donorBucket: nextDonorBucket,
+            recipientBucket: nextRecipientBucket,
+            donorResult,
+            recipientResult,
+            overflowAfter,
+            durationDelta,
+          };
+        }
+      }
+    }
+
+    if (!bestMove) break;
+
+    workingBuckets[bestMove.donorIndex] = bestMove.donorBucket;
+    workingBuckets[bestMove.recipientIndex] = bestMove.recipientBucket;
+    currentRoutes[bestMove.donorIndex] = bestMove.donorResult;
+    currentRoutes[bestMove.recipientIndex] = bestMove.recipientResult;
+  }
+
+  return workingBuckets;
+}
+
 async function buildRoutesForBuckets(
   volunteers: VolunteerEntry[],
   nonprofit: GeocodedAddress,
   buckets: GeocodedAddress[][]
 ): Promise<VolunteerRouteResult[]> {
-  const results: VolunteerRouteResult[] = [];
-
-  for (let vi = 0; vi < volunteers.length; vi++) {
-    const volunteer = volunteers[vi];
-    const bucket = buckets[vi];
-    if (bucket.length === 0) continue;
-
-    const numStops = Math.min(volunteer.numStops, bucket.length);
-    const selected = bucket.length > numStops
-      ? await selectBestDeliveries(nonprofit, bucket, numStops)
-      : bucket;
-
-    const origin = volunteer.homeAddress ?? nonprofit;
-    const destination = volunteer.homeAddress ?? nonprofit;
-
-    try {
-      const directionsResult = await getOptimizedDirections(nonprofit, destination, selected);
-      const route = buildRouteResult(origin, destination, nonprofit, selected, directionsResult);
-      results.push({ volunteer, route });
-    } catch (e) {
-      const addressList = selected.map((address) => address.formatted).join(', ');
-      const msg = e instanceof Error ? e.message : 'Unknown routing error';
-      results.push({
-        volunteer,
-        route: null,
-        error: `${msg}\n\nAssigned addresses: ${addressList}`,
-      });
-    }
-  }
-
-  return results;
+  const cache = new Map<string, VolunteerRouteResult>();
+  const results = await computeRoutesForBuckets(volunteers, nonprofit, buckets, cache);
+  return results.filter((_, index) => buckets[index].length > 0);
 }
 
 /**

@@ -62,13 +62,24 @@ export default function App() {
   const [nonprofitAddress, setNonprofitAddress] = useState<GeocodedAddress | null>(
     loadFromStorage<GeocodedAddress>('csj_nonprofit')
   );
+  const [uploadResetKey, setUploadResetKey] = useState(0);
 
   // Coordinator state
-  const [deliveryPool, setDeliveryPool] = useState<GeocodedAddress[]>([]);
-  const [coordinatorInputMode, setCoordinatorInputMode] = useState<'addresses' | 'sheet' | 'zip-list'>('addresses');
-  const [weeklySheetContext, setWeeklySheetContext] = useState<WeeklySheetContext | null>(null);
-  const [numVolunteers, setNumVolunteers] = useState(2);
-  const [volunteers, setVolunteers] = useState<VolunteerEntry[]>([]);
+  const [deliveryPool, setDeliveryPool] = useState<GeocodedAddress[]>(
+    loadFromStorage<GeocodedAddress[]>('csj_coord_delivery_pool') || []
+  );
+  const [coordinatorInputMode, setCoordinatorInputMode] = useState<'addresses' | 'sheet' | 'zip-list'>(
+    loadFromStorage<'addresses' | 'sheet' | 'zip-list'>('csj_coord_input_mode') || 'addresses'
+  );
+  const [weeklySheetContext, setWeeklySheetContext] = useState<WeeklySheetContext | null>(
+    loadFromStorage<WeeklySheetContext>('csj_weekly_sheet')
+  );
+  const [numVolunteers, setNumVolunteers] = useState(
+    loadFromStorage<number>('csj_coord_num_volunteers') || 2
+  );
+  const [volunteers, setVolunteers] = useState<VolunteerEntry[]>(
+    loadFromStorage<VolunteerEntry[]>('csj_coord_volunteers') || []
+  );
   const [coordResults, setCoordResults] = useState<VolunteerRouteResult[] | null>(null);
 
   // Volunteer state
@@ -128,6 +139,26 @@ export default function App() {
     setVolunteerHome(addr);
     saveToStorage('csj_vol_home', addr);
   }, []);
+
+  useEffect(() => {
+    saveToStorage('csj_coord_delivery_pool', deliveryPool);
+  }, [deliveryPool]);
+
+  useEffect(() => {
+    saveToStorage('csj_coord_input_mode', coordinatorInputMode);
+  }, [coordinatorInputMode]);
+
+  useEffect(() => {
+    saveToStorage('csj_weekly_sheet', weeklySheetContext);
+  }, [weeklySheetContext]);
+
+  useEffect(() => {
+    saveToStorage('csj_coord_num_volunteers', numVolunteers);
+  }, [numVolunteers]);
+
+  useEffect(() => {
+    saveToStorage('csj_coord_volunteers', volunteers);
+  }, [volunteers]);
 
   const handleSpreadsheetLoaded = useCallback((payload: {
     deliveries: GeocodedAddress[];
@@ -265,6 +296,21 @@ export default function App() {
     setAssignedDeliveries((prev) => [...prev, ...newOnes]);
   };
 
+  const clearCoordinatorDeliveries = () => {
+    setDeliveryPool([]);
+    setWeeklySheetContext(null);
+    setCoordinatorInputMode('addresses');
+    setCoordResults(null);
+    setError('');
+    setUploadResetKey((current) => current + 1);
+  };
+
+  const clearCoordinatorVolunteers = () => {
+    setVolunteers([]);
+    setCoordResults(null);
+    setError('');
+  };
+
   // ── Reset ──────────────────────────────────────────────────────────────────
   const resetCoord = () => { setCoordResults(null); setError(''); };
   const resetVol = () => { setVolResult(null); setError(''); };
@@ -387,8 +433,19 @@ export default function App() {
               <div className="space-y-4">
                 {/* Step 1: upload delivery pool */}
                 <div className="card p-4">
-                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Import Deliveries</p>
-                  <SpreadsheetUpload onSheetLoaded={handleSpreadsheetLoaded} />
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Step 1 — Import Deliveries</p>
+                    {deliveryPool.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={clearCoordinatorDeliveries}
+                        className="text-xs text-gray-400 hover:text-gray-600"
+                      >
+                        Clear deliveries
+                      </button>
+                    )}
+                  </div>
+                  <SpreadsheetUpload key={uploadResetKey} onSheetLoaded={handleSpreadsheetLoaded} />
                   {deliveryPool.length > 0 && coordinatorInputMode === 'sheet' && (
                     <p className="mt-3 text-xs font-medium text-green-700">
                       ✓ {deliveryPool.length} delivery ZIPs and {numVolunteers} driver neighborhoods ready
@@ -403,7 +460,18 @@ export default function App() {
 
                 {/* Step 2: volunteers */}
                 <div className="card p-4">
-                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">Step 2 — Volunteers</p>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Step 2 — Volunteers</p>
+                    {volunteers.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={clearCoordinatorVolunteers}
+                        className="text-xs text-gray-400 hover:text-gray-600"
+                      >
+                        Clear volunteers
+                      </button>
+                    )}
+                  </div>
                   <VolunteerList
                     numVolunteers={numVolunteers}
                     onNumVolunteersChange={setNumVolunteers}

@@ -18,6 +18,7 @@ function makeVolunteer(index: number): VolunteerEntry {
     homeAddress: null,
     homeNeighborhood: '',
     numStops: 0,
+    maxRouteMinutes: undefined,
   };
 }
 
@@ -54,7 +55,7 @@ export default function VolunteerList({
     } else if (volunteers.length > numVolunteers) {
       onChange(volunteers.slice(0, numVolunteers));
     }
-  }, [numVolunteers]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [numVolunteers, volunteers.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const splits = calcEvenSplit(totalPoolSize, numVolunteers);
   const stopsEach = splits[0] ?? 0;
@@ -160,6 +161,29 @@ function VolunteerRow({ index, volunteer, stops, locationMode, onUpdate }: Volun
             className="input"
           />
         </div>
+      </div>
+
+      <div>
+        <label className="mb-1 block text-xs font-medium text-gray-600">
+          Max Route Time <span className="text-gray-400">(optional, minutes)</span>
+        </label>
+        <input
+          type="number"
+          min={1}
+          step={5}
+          value={volunteer.maxRouteMinutes ?? ''}
+          onChange={(e) => {
+            const trimmed = e.target.value.trim();
+            onUpdate({
+              maxRouteMinutes: trimmed ? Math.max(1, parseInt(trimmed, 10) || 1) : undefined,
+            });
+          }}
+          placeholder="120"
+          className="input"
+        />
+        <p className="mt-1 text-xs text-gray-500">
+          We target 15 minutes under this to leave time for the actual drop-offs.
+        </p>
       </div>
 
       {locationMode === 'neighborhood' ? (
