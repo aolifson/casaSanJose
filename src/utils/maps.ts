@@ -15,6 +15,11 @@ const NEIGHBORHOOD_ZIP_OVERRIDES: Record<string, string> = {
 
 const NEIGHBORHOOD_NAME_ALIASES: Record<string, string> = {
   'mt lebo': 'Mt Lebanon',
+  'mt. lebo': 'Mt Lebanon',
+  'mt lebanon': 'Mt Lebanon',
+  'mt. lebanon': 'Mt Lebanon',
+  'mt lebonon': 'Mt Lebanon',
+  'mckees rock': 'McKees Rocks',
 };
 
 /**

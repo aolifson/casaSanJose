@@ -74,28 +74,28 @@ export default function RouteResults(props: RouteResultsProps) {
             {results.length} Routes Generated
           </h2>
           <div className="flex items-center gap-2">
-            {weeklySheet && (
-              <button
-                type="button"
-                onClick={async () => {
-                  setExportState('exporting');
-                  try {
-                    await exportWeeklySheetWorkbook(results, weeklySheet);
-                    setExportState('done');
-                  } catch {
-                    setExportState('idle');
-                  }
-                }}
-                disabled={exportState === 'exporting'}
-                className="btn-secondary text-xs py-1.5 px-3"
-              >
-                {exportState === 'exporting'
-                  ? 'Preparing Export...'
-                  : exportState === 'done'
-                  ? 'Downloaded Export'
-                  : 'Download Clean Sheet'}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={async () => {
+                setExportState('exporting');
+                try {
+                  await exportWeeklySheetWorkbook(results, weeklySheet);
+                  setExportState('done');
+                } catch {
+                  setExportState('idle');
+                }
+              }}
+              disabled={exportState === 'exporting'}
+              className="btn-secondary text-xs py-1.5 px-3"
+            >
+              {exportState === 'exporting'
+                ? 'Preparing Export...'
+                : exportState === 'done'
+                ? 'Downloaded Export'
+                : weeklySheet
+                ? 'Download Clean Sheet'
+                : 'Download Route Workbook'}
+            </button>
             {textBeltKey && phoneCount > 0 && (
               <button
                 type="button"

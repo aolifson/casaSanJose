@@ -59,16 +59,21 @@ function buildDriverNeighborhoodLookup(drivers: DeliverySheetDriver[]): Map<stri
   return new Map(drivers.map((driver) => [driver.name, driver.neighborhood]));
 }
 
+function displayVolunteerName(name: string | undefined, index: number): string {
+  return name?.trim() || `Volunteer ${index + 1}`;
+}
+
 function buildExportRows(
   results: VolunteerRouteResult[],
-  weeklySheet: WeeklySheetContext
+  weeklySheet?: WeeklySheetContext
 ): ExportRow[] {
-  const priorQueues = buildPriorQueues(weeklySheet.priorAssignments);
-  const driverNeighborhoodLookup = buildDriverNeighborhoodLookup(weeklySheet.drivers);
+  const priorQueues = buildPriorQueues(weeklySheet?.priorAssignments ?? []);
+  const driverNeighborhoodLookup = buildDriverNeighborhoodLookup(weeklySheet?.drivers ?? []);
   const rows: ExportRow[] = [];
 
-  for (const { volunteer, route } of results) {
-    if (!route) continue;
+  results.forEach(({ volunteer, route }, volunteerIndex) => {
+    if (!route) return;
+    const volunteerName = displayVolunteerName(volunteer.name, volunteerIndex);
 
     const deliveries = route.stops.filter((stop) => !stop.isFixed);
     deliveries.forEach((stop, index) => {
@@ -78,8 +83,8 @@ function buildExportRows(
       priorQueues.set(deliveryZip, queue);
 
       rows.push({
-        thisWeekDriver: volunteer.name,
-        driverNeighborhood: volunteer.homeNeighborhood || driverNeighborhoodLookup.get(volunteer.name) || '',
+        thisWeekDriver: volunteerName,
+        driverNeighborhood: volunteer.homeNeighborhood || driverNeighborhoodLookup.get(volunteerName) || '',
         deliveryZip,
         fullAddress: stop.address.sourceType === 'address' ? stop.address.formatted : '',
         routeOrder: index + 1,
@@ -90,7 +95,7 @@ function buildExportRows(
         routeLink: route.googleMapsUrl,
       });
     });
-  }
+  });
 
   return rows.sort((a, b) => {
     if (a.thisWeekDriver !== b.thisWeekDriver) return a.thisWeekDriver.localeCompare(b.thisWeekDriver);
@@ -114,6 +119,24 @@ function buildDriverSummary(rows: ExportRow[], drivers: DeliverySheetDriver[]) {
       Notes: '',
     };
   });
+}
+
+function buildFallbackDrivers(results: VolunteerRouteResult[]): DeliverySheetDriver[] {
+  const seen = new Set<string>();
+  const drivers: DeliverySheetDriver[] = [];
+
+  results.forEach(({ volunteer }, index) => {
+    const volunteerName = displayVolunteerName(volunteer.name, index);
+    const key = volunteer.id || volunteerName;
+    if (seen.has(key)) return;
+    seen.add(key);
+    drivers.push({
+      name: volunteerName,
+      neighborhood: volunteer.homeNeighborhood || volunteer.homeZipCode || volunteer.homeAddress?.formatted || '',
+    });
+  });
+
+  return drivers;
 }
 
 function styleSheetHeaders(
@@ -163,10 +186,13 @@ function createWorksheetFromObjects(
 
 export async function exportWeeklySheetWorkbook(
   results: VolunteerRouteResult[],
-  weeklySheet: WeeklySheetContext
+  weeklySheet?: WeeklySheetContext
 ) {
   const XLSX = await import('xlsx-js-style');
   const deliveries = buildExportRows(results, weeklySheet);
+  const summaryDrivers = weeklySheet?.drivers?.length
+    ? weeklySheet.drivers
+    : buildFallbackDrivers(results);
   const deliverySheetRows = deliveries.map((row) => ({
     'This Week Driver': row.thisWeekDriver,
     'Driver Neighborhood': row.driverNeighborhood,
@@ -180,7 +206,7 @@ export async function exportWeeklySheetWorkbook(
     'Route Link': row.routeLink,
   }));
 
-  const summaryRows = buildDriverSummary(deliveries, weeklySheet.drivers);
+  const summaryRows = buildDriverSummary(deliveries, summaryDrivers);
 
   const workbook = XLSX.utils.book_new();
   const deliveriesSheet = createWorksheetFromObjects(XLSX, deliverySheetRows.length > 0 ? deliverySheetRows : [{
@@ -232,6 +258,6 @@ export async function exportWeeklySheetWorkbook(
   XLSX.utils.book_append_sheet(workbook, deliveriesSheet as never, 'Deliveries');
   XLSX.utils.book_append_sheet(workbook, summarySheet as never, 'Driver Summary');
 
-  const tabName = weeklySheet.source?.tabName?.replace(/[\\/:*?"<>|]/g, '-').trim() || 'weekly-routes';
-  XLSX.writeFile(workbook, `${tabName}-clean-export.xlsx`);
+  const tabName = weeklySheet?.source?.tabName?.replace(/[\\/:*?"<>|]/g, '-').trim() || 'routes';
+  XLSX.writeFile(workbook, `${tabName}-export.xlsx`);
 }

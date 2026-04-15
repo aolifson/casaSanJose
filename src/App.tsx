@@ -65,7 +65,7 @@ export default function App() {
 
   // Coordinator state
   const [deliveryPool, setDeliveryPool] = useState<GeocodedAddress[]>([]);
-  const [coordinatorInputMode, setCoordinatorInputMode] = useState<'addresses' | 'sheet'>('addresses');
+  const [coordinatorInputMode, setCoordinatorInputMode] = useState<'addresses' | 'sheet' | 'zip-list'>('addresses');
   const [weeklySheetContext, setWeeklySheetContext] = useState<WeeklySheetContext | null>(null);
   const [numVolunteers, setNumVolunteers] = useState(2);
   const [volunteers, setVolunteers] = useState<VolunteerEntry[]>([]);
@@ -135,19 +135,21 @@ export default function App() {
     volunteers?: VolunteerEntry[];
     weeklySheet?: WeeklySheetContext;
   }) => {
-    setCoordinatorInputMode(payload.importKind === 'weekly-sheet' ? 'sheet' : 'addresses');
+    setCoordinatorInputMode(payload.importKind === 'weekly-sheet' ? 'sheet' : 'zip-list');
     setWeeklySheetContext(payload.importKind === 'weekly-sheet' ? payload.weeklySheet ?? null : null);
     setDeliveryPool(payload.deliveries);
     if (payload.importKind === 'weekly-sheet' && payload.volunteers) {
       setVolunteers(payload.volunteers);
       setNumVolunteers(payload.volunteers.length);
+    } else if (payload.importKind === 'zip-list') {
+      setVolunteers([]);
     }
     setCoordResults(null);
     setError('');
   }, []);
 
   const resolveCoordinatorVolunteerLocations = useCallback(async (inputVolunteers: VolunteerEntry[]) => {
-    if (coordinatorInputMode !== 'sheet') return inputVolunteers;
+    if (coordinatorInputMode === 'addresses') return inputVolunteers;
 
     const hydrated = await Promise.all(
       inputVolunteers.map(async (volunteer) => {
@@ -211,7 +213,7 @@ export default function App() {
 
       const hydratedVolunteers = await resolveCoordinatorVolunteerLocations(volunteersWithStops);
 
-      if (coordinatorInputMode === 'sheet') {
+      if (coordinatorInputMode !== 'addresses') {
         const missingNeighborhoods = hydratedVolunteers.filter(
           (volunteer) => volunteer.numStops > 0 && (!volunteer.homeNeighborhood?.trim() || !volunteer.homeAddress)
         );
@@ -221,14 +223,14 @@ export default function App() {
         }
       }
 
-      const results = coordinatorInputMode === 'sheet'
-        ? await computeNeighborhoodRoutes(
+      const results = coordinatorInputMode === 'addresses'
+        ? await computeMultiVolunteerRoutes(hydratedVolunteers, nonprofitAddress, deliveryPool)
+        : await computeNeighborhoodRoutes(
             hydratedVolunteers,
             nonprofitAddress,
             deliveryPool,
             weeklySheetContext?.priorAssignments ?? []
-          )
-        : await computeMultiVolunteerRoutes(hydratedVolunteers, nonprofitAddress, deliveryPool);
+          );
       setCoordResults(results);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate routes. Please try again.');
@@ -392,6 +394,11 @@ export default function App() {
                       ✓ {deliveryPool.length} delivery ZIPs and {numVolunteers} driver neighborhoods ready
                     </p>
                   )}
+                  {deliveryPool.length > 0 && coordinatorInputMode === 'zip-list' && (
+                    <p className="mt-3 text-xs font-medium text-green-700">
+                      ✓ {deliveryPool.length} delivery ZIPs ready; add volunteer neighborhoods below
+                    </p>
+                  )}
                 </div>
 
                 {/* Step 2: volunteers */}
@@ -403,7 +410,7 @@ export default function App() {
                     volunteers={volunteers}
                     onChange={setVolunteers}
                     totalPoolSize={deliveryPool.length}
-                    locationMode={coordinatorInputMode === 'sheet' ? 'neighborhood' : 'address'}
+                    locationMode={coordinatorInputMode === 'addresses' ? 'address' : 'neighborhood'}
                   />
                 </div>
 
